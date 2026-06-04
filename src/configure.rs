@@ -133,31 +133,27 @@ fn prompt_scope(default: Scope) -> util::R<Scope> {
 
 fn prompt_clis(default: &[Cli]) -> util::R<Vec<Cli>> {
     println!();
-    println!("Select CLIs to install/sync:");
-    for (idx, cli) in Cli::ALL.iter().enumerate() {
-        let installed = adapters::installed(*cli);
+    println!("Install/sync which CLIs?");
+    let mut out = Vec::new();
+    for cli in Cli::ALL {
+        let installed = adapters::installed(cli);
         let marker = if installed {
             "installed"
         } else {
             "not installed"
         };
-        let selected = if default.contains(cli) { " *" } else { "" };
-        println!("  {}) {:<12} {}{}", idx + 1, cli.id(), marker, selected);
-    }
-    println!("Enter numbers or names separated by commas/spaces. Shortcuts: all, installed.");
-    let default_label = if default.is_empty() {
-        "none".to_string()
-    } else {
-        default.iter().map(|c| c.id()).collect::<Vec<_>>().join(",")
-    };
-    loop {
-        let input = prompt(&format!("CLIs [{default_label}]: "))?;
-        match parse_cli_selection(&input, default) {
-            Ok(clis) if !clis.is_empty() => return Ok(clis),
-            Ok(_) => println!("Select at least one CLI."),
-            Err(e) => println!("{e}"),
+        if prompt_yes_no(
+            &format!("  {} ({})", cli.id(), marker),
+            default.contains(&cli),
+        )? {
+            out.push(cli);
         }
     }
+    if out.is_empty() {
+        println!("Select at least one CLI.");
+        return prompt_clis(default);
+    }
+    Ok(out)
 }
 
 fn parse_cli_selection(input: &str, default: &[Cli]) -> util::R<Vec<Cli>> {
@@ -198,6 +194,22 @@ fn parse_cli_selection(input: &str, default: &[Cli]) -> util::R<Vec<Cli>> {
             "Unknown CLI selection: {}. Use numbers, names, all, or installed.",
             invalid.join(", ")
         ))
+    }
+}
+
+fn prompt_yes_no(label: &str, default: bool) -> util::R<bool> {
+    let suffix = if default { "[Y/n]" } else { "[y/N]" };
+    loop {
+        let input = prompt(&format!("{label} {suffix}: "))?;
+        let trimmed = input.trim().to_ascii_lowercase();
+        if trimmed.is_empty() {
+            return Ok(default);
+        }
+        match trimmed.as_str() {
+            "y" | "yes" => return Ok(true),
+            "n" | "no" => return Ok(false),
+            _ => println!("Please enter y or n."),
+        }
     }
 }
 
