@@ -111,6 +111,10 @@ fn cmd_mount(args: &[String]) -> R<()> {
 }
 
 fn cmd_status() -> R<()> {
+    print_status()
+}
+
+pub(crate) fn print_status() -> R<()> {
     let cfg = config::load()?;
 
     println!("cli-switch {VERSION}");

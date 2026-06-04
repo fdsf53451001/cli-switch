@@ -3,7 +3,7 @@
 use crate::adapters;
 use crate::config::{self, Config, Scope};
 use crate::model::Cli;
-use crate::{mount, paths, project, store, util};
+use crate::{mount, paths, store, sync, util};
 use std::io::{self, Write};
 
 pub fn run(args: &[String]) -> util::R<()> {
@@ -58,18 +58,6 @@ pub fn run(args: &[String]) -> util::R<()> {
     );
     println!("  config: {}", paths::store_config().display());
 
-    if scope == Scope::Project {
-        let out = project::sync(
-            &clis,
-            &project::Options {
-                instructions: true,
-                skills: true,
-                dry_run: false,
-            },
-        )?;
-        report_project(out);
-    }
-
     if !no_mount {
         let installed = clis
             .iter()
@@ -86,6 +74,18 @@ pub fn run(args: &[String]) -> util::R<()> {
             }
         }
     }
+
+    println!();
+    println!("Running initial sync...");
+    sync::run(&sync::Options {
+        prune: false,
+        quiet: false,
+        dry_run: false,
+    })?;
+
+    println!();
+    println!("Current status:");
+    crate::print_status()?;
 
     Ok(())
 }
@@ -221,19 +221,4 @@ fn prompt(message: &str) -> util::R<String> {
         .read_line(&mut input)
         .map_err(|e| e.to_string())?;
     Ok(input)
-}
-
-fn report_project(out: project::Outcome) {
-    if !out.actions.is_empty() {
-        println!("Project sync:");
-        for action in out.actions {
-            println!("  [+] {action}");
-        }
-    }
-    for note in out.notes {
-        println!("  [-] {note}");
-    }
-    for conflict in out.conflicts {
-        eprintln!("  [!] {conflict}");
-    }
 }

@@ -57,9 +57,7 @@ cli-switch mount     # 掛載「啟動時自動同步」到各 CLI
 典型首次流程：
 
 ```bash
-cli-switch configure     # 建議使用；會寫 config 並對已安裝 CLI 掛 startup sync
-cli-switch sync          # 把你現有各家設定吸進真理來源並互相散播
-cli-switch status
+cli-switch configure     # 寫 config、掛 startup sync、立即同步一次並顯示 status
 ```
 
 非互動設定也可以：
@@ -71,7 +69,7 @@ cli-switch configure --scope project --clis claude,codex,kiro --yes
 
 `--scope global` 會同步使用者全域設定；`--scope project` 會同步**目前工作目錄**。
 
-互動模式會先逐項確認要同步的 CLI，再選全域或當前目錄同步。非互動模式仍可用 `--clis installed`、`--clis all` 或 `--clis claude,codex`。
+互動模式會先逐項確認要同步的 CLI，再選全域或當前目錄同步；設定完成後會立即同步一次並顯示 status。非互動模式仍可用 `--clis installed`、`--clis all` 或 `--clis claude,codex`。
 
 ### sync 選項
 
