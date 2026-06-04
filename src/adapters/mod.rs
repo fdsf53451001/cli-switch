@@ -18,9 +18,29 @@ pub fn installed(cli: Cli) -> bool {
         Cli::Codex => h.join(".codex"),
         Cli::Opencode => h.join(".config").join("opencode"),
         Cli::Kiro => h.join(".kiro"),
-        Cli::Antigravity => h.join(".gemini").join("antigravity"),
+        Cli::Antigravity => {
+            return command_exists("agy") || h.join(".gemini").join("antigravity-cli").exists();
+        }
     };
     probe.exists()
+}
+
+fn command_exists(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| {
+            std::env::split_paths(&paths).any(|dir| {
+                let plain = dir.join(name);
+                #[cfg(windows)]
+                {
+                    plain.exists() || dir.join(format!("{name}.exe")).exists()
+                }
+                #[cfg(not(windows))]
+                {
+                    plain.exists()
+                }
+            })
+        })
+        .unwrap_or(false)
 }
 
 /// Read a CLI's MCP servers into the neutral model. Missing file -> empty map.

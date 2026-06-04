@@ -2,7 +2,7 @@
 
 把 **MCP servers、skills、instructions** 在多個 AI CLI 之間自動同步，並可掛載到各 CLI 啟動時自動執行。
 
-支援：**Claude Code · Codex · opencode · Kiro · Antigravity**
+支援：**Claude Code · Codex · opencode · Kiro · Antigravity CLI (`agy`)**
 
 單一 Rust 編譯 binary，**執行期零依賴**，原生跨 macOS / Linux / Windows。
 
@@ -12,11 +12,11 @@
 
 你在五個 CLI 裡各自維護 MCP server、skill、指令檔，格式還互不相容：
 
-| 項目 | Claude | Codex | opencode | Kiro | Antigravity |
+| 項目 | Claude | Codex | opencode | Kiro | Antigravity CLI (`agy`) |
 |------|--------|-------|----------|------|-------------|
-| MCP 檔 | `~/.claude.json` | `~/.codex/config.toml` | `~/.config/opencode/opencode.json` | `~/.kiro/settings/mcp.json` | `~/.gemini/antigravity/mcp_config.json` |
+| MCP 檔 | `~/.claude.json` | `~/.codex/config.toml` | `~/.config/opencode/opencode.json` | `~/.kiro/settings/mcp.json` | `~/.gemini/antigravity-cli/mcp_config.json` |
 | MCP 格式 | JSON `mcpServers` | TOML `[mcp_servers.x]` | JSON `mcp`（command 為陣列、`environment`） | JSON `mcpServers` | JSON `mcpServers`（`serverUrl`、禁多餘鍵） |
-| Skills | `~/.claude/skills/` | `~/.codex/skills/` | `~/.config/opencode/skills/` | `~/.kiro/skills/` | `~/.gemini/antigravity/skills/` |
+| Skills | `~/.claude/skills/` | `~/.codex/skills/` | `~/.config/opencode/skills/` | `~/.kiro/skills/` | `~/.gemini/antigravity-cli/skills/` |
 | 指令檔 | `CLAUDE.md` | `AGENTS.md` | `AGENTS.md` | `steering/AGENTS.md` | `GEMINI.md` |
 
 `cli-switch` 用一個**中立的單一真理來源**（`~/.config/cli-switch/`）把這些拉平：MCP 用轉換器產生各家原生格式，skills/instructions 用 symlink。**雙向**——你在任一 CLI 改了，下次同步會合併回來再散播給其他家。
@@ -151,11 +151,11 @@ AGENTS.md          # 專案指令檔 SSOT，必須先存在
 | Claude Code | `settings.json` 的 `SessionStart` hook | ✅ 原生、穩定 |
 | Codex | `~/.codex/hooks.json` 的 SessionStart | ⚠️ 實驗性，需 `codex /hooks` 核准 |
 | opencode | `~/.config/opencode/plugin/cli-switch.js` | ⚠️ 實驗性，plugin 事件名稱可能改版 |
-| Kiro / Antigravity | 無原生 startup hook → 產生 shell wrapper（`~/.config/cli-switch/shell-init.sh`） | ⚠️ 僅終端機啟動；GUI/Dock 啟動需改用定時同步 |
+| Kiro / Antigravity CLI (`agy`) | 無原生 startup hook → 產生 shell wrapper（`~/.config/cli-switch/shell-init.sh`） | ⚠️ 僅終端機啟動；GUI/Dock 啟動需改用定時同步 |
 
 `mount` 會自動偵測既有設定並**就地合併**（不會覆蓋你 Claude 既有的其他 hook），且重複執行不會疊加。
 
-Kiro / Antigravity 是 GUI（VS Code fork），沒有給 CLI 用的啟動 hook。若要涵蓋 GUI 啟動，建議搭配定時同步（cron / launchd / 排程器）。
+Kiro / Antigravity CLI (`agy`) 目前沒有像 Claude/Codex 那樣的 startup hook。`mount` 會產生 shell wrapper，讓從終端機啟動時先同步；若要涵蓋其他啟動方式，建議搭配定時同步（cron / launchd / 排程器）。
 
 ---
 
@@ -165,4 +165,4 @@ Kiro / Antigravity 是 GUI（VS Code fork），沒有給 CLI 用的啟動 hook�
 - **原子寫入**：先寫暫存檔再 rename，避免半寫壞檔。
 - **每次備份**：寫入前把各 CLI 原檔複製到 `backups/`。
 - **並發鎖**：多個 CLI 同時啟動觸發同步時，只有一個實際執行，其餘跳過。
-- **Antigravity schema 合規**：嚴格只輸出 schema 允許的鍵（`additionalProperties:false`）。
+- **Antigravity CLI schema 合規**：嚴格只輸出 schema 允許的鍵（remote server 使用 `serverUrl`）。

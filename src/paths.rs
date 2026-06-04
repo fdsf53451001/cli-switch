@@ -62,7 +62,7 @@ pub fn mcp_config(cli: Cli) -> PathBuf {
         Cli::Kiro => h.join(".kiro").join("settings").join("mcp.json"),
         Cli::Antigravity => h
             .join(".gemini")
-            .join("antigravity")
+            .join("antigravity-cli")
             .join("mcp_config.json"),
     }
 }
@@ -75,7 +75,7 @@ pub fn skills_dir(cli: Cli) -> PathBuf {
         Cli::Codex => h.join(".codex").join("skills"),
         Cli::Opencode => h.join(".config").join("opencode").join("skills"),
         Cli::Kiro => h.join(".kiro").join("skills"),
-        Cli::Antigravity => h.join(".gemini").join("antigravity").join("skills"),
+        Cli::Antigravity => h.join(".gemini").join("antigravity-cli").join("skills"),
     }
 }
 

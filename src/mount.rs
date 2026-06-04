@@ -4,8 +4,8 @@
 //! - Codex: hooks.json SessionStart entry (mechanism verified; schema may need
 //!   `codex /hooks` approval — marked experimental).
 //! - opencode: a global plugin that runs sync on session start (experimental).
-//! - Kiro / Antigravity: no startup hook exists — we generate a shell-init file
-//!   with wrapper functions so terminal launches sync first.
+//! - Kiro / Antigravity CLI (`agy`): no startup hook exists — we generate a
+//!   shell-init file with wrapper functions so terminal launches sync first.
 
 use crate::model::Cli;
 use crate::paths;
@@ -177,26 +177,24 @@ export default async ({{ $ }}) => {{
     ))
 }
 
-// ───────────────────────── shell-init for GUI CLIs ─────────────────────────
+// ───────────────────────── shell-init for CLIs without hooks ─────────────────────────
 
 fn write_shell_init(exe: &str) -> R<String> {
     let path = paths::store_root().join("shell-init.sh");
     let script = format!(
         r#"# cli-switch shell init — source this from ~/.zshrc or ~/.bashrc:
 #   source "{path}"
-# Wraps Kiro/Antigravity terminal launches so config syncs first.
-# (GUI/Dock launches bypass the shell; use a periodic sync for those.)
+# Wraps Kiro/agy terminal launches so config syncs first.
 __cli_switch_run() {{ command "{exe}" sync --quiet >/dev/null 2>&1 || true; }}
 kiro()        {{ __cli_switch_run; command kiro "$@"; }}
 agy()         {{ __cli_switch_run; command agy "$@"; }}
-antigravity() {{ __cli_switch_run; command antigravity "$@"; }}
 "#,
         path = path.display(),
         exe = exe
     );
     util::write_atomic(&path, &script)?;
     Ok(format!(
-        "kiro/antigravity: no native hook — wrappers written to {}\n         add to your shell rc:  source \"{}\"",
+        "kiro/agy: no native hook — wrappers written to {}\n         add to your shell rc:  source \"{}\"",
         path.display(),
         path.display()
     ))
