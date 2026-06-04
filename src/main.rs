@@ -344,17 +344,42 @@ fn count_dirs(dir: &std::path::Path) -> usize {
 }
 
 fn startup_state(cli: Cli) -> &'static str {
+    if matches!(cli, Cli::Kiro) {
+        return shell_startup_state();
+    }
+    if matches!(cli, Cli::Antigravity) {
+        return antigravity_startup_state();
+    }
     let path = match cli {
         Cli::Claude => paths::claude_settings(),
         Cli::Codex => paths::codex_hooks(),
         Cli::Opencode => paths::opencode_plugin(),
-        Cli::Kiro | Cli::Antigravity => paths::store_root().join("shell-init.sh"),
+        Cli::Kiro | Cli::Antigravity => unreachable!(),
     };
     match std::fs::read_to_string(path) {
         Ok(text) if text.contains("cli-switch") || text.contains("__cli_switch_run") => "mounted",
         Ok(_) => "custom",
         Err(_) => "missing",
     }
+}
+
+fn antigravity_startup_state() -> &'static str {
+    match std::fs::read_to_string(paths::antigravity_hooks()) {
+        Ok(text) if text.contains("cli-switch-sync") && text.contains("PreInvocation") => "mounted",
+        Ok(_) => "custom",
+        Err(_) => "missing",
+    }
+}
+
+fn shell_startup_state() -> &'static str {
+    let init = paths::shell_init();
+    let Ok(init_text) = std::fs::read_to_string(&init) else {
+        return "missing";
+    };
+    if !init_text.contains("__cli_switch_run") {
+        return "custom";
+    }
+    "written"
 }
 
 fn count_synced_skill_links(cli_dir: &std::path::Path, store_skills: &std::path::Path) -> usize {

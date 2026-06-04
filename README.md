@@ -151,11 +151,14 @@ AGENTS.md          # 專案指令檔 SSOT，必須先存在
 | Claude Code | `settings.json` 的 `SessionStart` hook | ✅ 原生、穩定 |
 | Codex | `~/.codex/hooks.json` 的 SessionStart | ⚠️ 實驗性，需 `codex /hooks` 核准 |
 | opencode | `~/.config/opencode/plugin/cli-switch.js` | ⚠️ 實驗性，plugin 事件名稱可能改版 |
-| Kiro / Antigravity CLI (`agy`) | 無原生 startup hook → 產生 shell wrapper（`~/.config/cli-switch/shell-init.sh`） | ⚠️ 僅終端機啟動；GUI/Dock 啟動需改用定時同步 |
+| Kiro | 無原生 startup hook → 產生 shell wrapper（`~/.config/cli-switch/shell-init.sh`） | ⚠️ 需手動 source 到 shell rc |
+| Antigravity CLI (`agy`) | `~/.gemini/config/hooks.json` 的 `PreInvocation` hook | ✅ 原生 hook；每次模型呼叫前同步 |
 
 `mount` 會自動偵測既有設定並**就地合併**（不會覆蓋你 Claude 既有的其他 hook），且重複執行不會疊加。
 
-Kiro / Antigravity CLI (`agy`) 目前沒有像 Claude/Codex 那樣的 startup hook。`mount` 會產生 shell wrapper，讓從終端機啟動時先同步；若要涵蓋其他啟動方式，建議搭配定時同步（cron / launchd / 排程器）。
+Kiro 目前沒有像 Claude/Codex 那樣的 startup hook。`mount` 會產生 shell wrapper，讓從終端機啟動時先同步；需要手動把 `source ~/.config/cli-switch/shell-init.sh` 放進 shell rc。
+
+Antigravity CLI (`agy`) 使用官方 hooks：`mount` 會在 `~/.gemini/config/hooks.json` 寫入 `cli-switch-sync`，掛到 `PreInvocation`，讓每次模型呼叫前先同步。
 
 ---
 

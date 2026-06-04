@@ -51,6 +51,9 @@ pub fn store_snapshot(cli: Cli) -> PathBuf {
 pub fn store_backups() -> PathBuf {
     store_root().join("backups")
 }
+pub fn shell_init() -> PathBuf {
+    store_root().join("shell-init.sh")
+}
 
 /// Path to the file holding a CLI's MCP servers (the file we read/merge/write).
 pub fn mcp_config(cli: Cli) -> PathBuf {
@@ -117,4 +120,7 @@ pub fn opencode_plugin() -> PathBuf {
         .join("opencode")
         .join("plugin")
         .join("cli-switch.js")
+}
+pub fn antigravity_hooks() -> PathBuf {
+    home().join(".gemini").join("config").join("hooks.json")
 }

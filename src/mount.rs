@@ -4,8 +4,8 @@
 //! - Codex: hooks.json SessionStart entry (mechanism verified; schema may need
 //!   `codex /hooks` approval — marked experimental).
 //! - opencode: a global plugin that runs sync on session start (experimental).
-//! - Kiro / Antigravity CLI (`agy`): no startup hook exists — we generate a
-//!   shell-init file with wrapper functions so terminal launches sync first.
+//! - Antigravity CLI (`agy`): native lifecycle hook in ~/.gemini/config/hooks.json.
+//! - Kiro: no startup hook exists — we generate a shell-init wrapper.
 
 use crate::model::Cli;
 use crate::paths;
@@ -31,11 +31,12 @@ pub fn mount(clis: &[Cli]) -> R<MountReport> {
             Cli::Claude => lines.push(install_claude_hook(&exe)?),
             Cli::Codex => lines.push(install_codex_hook(&exe)?),
             Cli::Opencode => lines.push(install_opencode_plugin(&exe)?),
-            Cli::Kiro | Cli::Antigravity => {} // covered by shell-init below
+            Cli::Antigravity => lines.push(install_antigravity_hook(&exe)?),
+            Cli::Kiro => {} // covered by shell-init below
         }
     }
 
-    if clis.contains(&Cli::Kiro) || clis.contains(&Cli::Antigravity) {
+    if clis.contains(&Cli::Kiro) {
         lines.push(write_shell_init(&exe)?);
     }
 
@@ -177,24 +178,82 @@ export default async ({{ $ }}) => {{
     ))
 }
 
+// ───────────────────────── Antigravity CLI ─────────────────────────
+
+fn install_antigravity_hook(exe: &str) -> R<String> {
+    let path = paths::antigravity_hooks();
+    let mut root: Value = match util::read_to_string_opt(&path)? {
+        Some(t) if !t.trim().is_empty() => {
+            serde_json::from_str(&t).map_err(|e| util::ctx(&path, e))?
+        }
+        _ => Value::Object(Map::new()),
+    };
+    if !root.is_object() {
+        root = Value::Object(Map::new());
+    }
+    let obj = root.as_object_mut().unwrap();
+    obj.retain(|name, val| {
+        !name.contains("cli-switch")
+            && !name.contains("agent-sync")
+            && !value_mentions(val, "cli-switch")
+            && !value_mentions(val, "agent-sync")
+    });
+
+    let command = format!(
+        "sh -c '{} sync --quiet >/dev/null 2>&1 || true; printf \"{{}}\"'",
+        shell_double_quote(exe)
+    );
+    obj.insert(
+        "cli-switch-sync".into(),
+        json!({
+            "PreInvocation": [{
+                "type": "command",
+                "command": command,
+                "timeout": 30
+            }]
+        }),
+    );
+
+    let out = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    util::write_atomic(&path, &out)?;
+    Ok(format!(
+        "antigravity: PreInvocation hook written -> {}",
+        path.display()
+    ))
+}
+
+fn value_mentions(value: &Value, needle: &str) -> bool {
+    match value {
+        Value::String(s) => s.contains(needle),
+        Value::Array(arr) => arr.iter().any(|v| value_mentions(v, needle)),
+        Value::Object(obj) => obj
+            .iter()
+            .any(|(k, v)| k.contains(needle) || value_mentions(v, needle)),
+        _ => false,
+    }
+}
+
+fn shell_double_quote(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', r"\\").replace('"', "\\\""))
+}
+
 // ───────────────────────── shell-init for CLIs without hooks ─────────────────────────
 
 fn write_shell_init(exe: &str) -> R<String> {
-    let path = paths::store_root().join("shell-init.sh");
+    let path = paths::shell_init();
     let script = format!(
         r#"# cli-switch shell init — source this from ~/.zshrc or ~/.bashrc:
 #   source "{path}"
-# Wraps Kiro/agy terminal launches so config syncs first.
+# Wraps Kiro terminal launches so config syncs first.
 __cli_switch_run() {{ command "{exe}" sync --quiet >/dev/null 2>&1 || true; }}
 kiro()        {{ __cli_switch_run; command kiro "$@"; }}
-agy()         {{ __cli_switch_run; command agy "$@"; }}
 "#,
         path = path.display(),
         exe = exe
     );
     util::write_atomic(&path, &script)?;
     Ok(format!(
-        "kiro/agy: no native hook — wrappers written to {}\n         add to your shell rc:  source \"{}\"",
+        "kiro: no native hook — wrapper written to {}\n         add to your shell rc:  source \"{}\"",
         path.display(),
         path.display()
     ))
