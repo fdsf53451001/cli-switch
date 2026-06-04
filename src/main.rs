@@ -171,55 +171,34 @@ fn status_global(cfg: &config::Config) -> R<()> {
     println!(
         "canonical: {} MCP server(s), instructions={}, skills={}",
         canonical.servers.len(),
-        file_state(paths::store_instructions().exists()),
+        yn(paths::store_instructions().exists()),
         canonical_skill_count
     );
     println!();
     println!(
-        "{:<13} {:<8} {:<10} {:<7} {:<13} {:<8} {:<12}",
-        "CLI", "state", "app", "mcp", "instructions", "skills", "startup"
+        "{:<13} {:<8} {:<10} {:<7} {:<13} {:<8} {:<10}",
+        "CLI", "sync", "installed", "mcp", "instructions", "skills", "startup"
     );
-    println!("{}", "-".repeat(80));
+    println!("{}", "-".repeat(78));
 
     for cli in Cli::ALL {
         let installed = adapters::installed(cli);
         let configured = cfg.clis.contains(&cli);
         let active = configured && installed;
-        let state = global_sync_state(configured, installed);
-        let mcp_n = if configured && installed {
-            adapters::read_mcp(cli)
-                .map(|m| m.len().to_string())
-                .unwrap_or_else(|_| "?".to_string())
-        } else {
-            "-".to_string()
-        };
-        let instr = if active {
-            link_state(&paths::instructions_file(cli), &paths::store_instructions())
-        } else if configured {
-            "skipped"
-        } else {
-            "off"
-        };
-        let skills = if active {
-            format!(
-                "{}/{}",
-                count_synced_skill_links(&paths::skills_dir(cli), &paths::store_skills()),
-                canonical_skill_count
-            )
-        } else if configured {
-            "skipped".to_string()
-        } else {
-            "-".to_string()
-        };
+        let mcp = active && adapters::read_mcp(cli).is_ok();
+        let instr = active && link_ok(&paths::instructions_file(cli), &paths::store_instructions());
+        let skills = active
+            && count_synced_skill_links(&paths::skills_dir(cli), &paths::store_skills())
+                == canonical_skill_count;
         println!(
-            "{:<13} {:<8} {:<10} {:<7} {:<13} {:<8} {:<12}",
+            "{:<13} {:<8} {:<10} {:<7} {:<13} {:<8} {:<10}",
             cli.id(),
-            state,
-            installed_state(installed),
-            mcp_n,
-            instr,
-            skills,
-            startup_state(cli)
+            yn(configured),
+            yn(installed),
+            yn(mcp),
+            yn(instr),
+            yn(skills),
+            yn(startup_ok(cli))
         );
     }
 
@@ -240,14 +219,6 @@ fn status_global(cfg: &config::Config) -> R<()> {
     Ok(())
 }
 
-fn global_sync_state(configured: bool, installed: bool) -> &'static str {
-    match (configured, installed) {
-        (true, true) => "active",
-        (true, false) => "skipped",
-        (false, _) => "off",
-    }
-}
-
 fn status_project(cfg: &config::Config) -> R<()> {
     let root = std::env::current_dir().map_err(|e| e.to_string())?;
     let agents = root.join("AGENTS.md");
@@ -255,7 +226,7 @@ fn status_project(cfg: &config::Config) -> R<()> {
     let antigravity_rule = root.join(".agents").join("rules").join("agents-root.md");
 
     println!("project: {}", root.display());
-    println!("AGENTS.md: {}", file_state(agents.exists()));
+    println!("AGENTS.md: {}", yn(agents.exists()));
     println!(
         ".agents/skills: {} skill dir(s)",
         if skills.exists() {
@@ -270,31 +241,25 @@ fn status_project(cfg: &config::Config) -> R<()> {
     );
     println!();
     println!(
-        "{:<13} {:<9} {:<10} {:<18} {:<18} {:<12}",
-        "CLI", "project", "app", "instructions", "skills", "startup"
+        "{:<13} {:<8} {:<10} {:<13} {:<8} {:<10}",
+        "CLI", "sync", "installed", "instructions", "skills", "startup"
     );
-    println!("{}", "-".repeat(86));
+    println!("{}", "-".repeat(68));
 
     for cli in Cli::ALL {
         let configured = cfg.clis.contains(&cli);
-        let instructions = if configured && cfg.instructions {
-            project_instruction_state(cli, &root, &agents, &antigravity_rule)
-        } else {
-            "off"
-        };
-        let skills_state = if configured && cfg.skills {
-            project_skills_state(cli, &root, &skills)
-        } else {
-            "off"
-        };
+        let instructions = configured
+            && cfg.instructions
+            && project_instruction_ok(cli, &root, &agents, &antigravity_rule);
+        let skills_state = configured && cfg.skills && project_skills_ok(cli, &root, &skills);
         println!(
-            "{:<13} {:<9} {:<10} {:<18} {:<18} {:<12}",
+            "{:<13} {:<8} {:<10} {:<13} {:<8} {:<10}",
             cli.id(),
-            enabled_state(configured),
-            installed_state(adapters::installed(cli)),
-            instructions,
-            skills_state,
-            startup_state(cli)
+            yn(configured),
+            yn(adapters::installed(cli)),
+            yn(instructions),
+            yn(skills_state),
+            yn(startup_ok(cli))
         );
     }
 
@@ -305,27 +270,11 @@ fn status_project(cfg: &config::Config) -> R<()> {
     Ok(())
 }
 
-fn enabled_state(enabled: bool) -> &'static str {
-    if enabled {
-        "enabled"
+fn yn(b: bool) -> &'static str {
+    if b {
+        "yes"
     } else {
-        "off"
-    }
-}
-
-fn installed_state(installed: bool) -> &'static str {
-    if installed {
-        "installed"
-    } else {
-        "not found"
-    }
-}
-
-fn file_state(exists: bool) -> &'static str {
-    if exists {
-        "present"
-    } else {
-        "missing"
+        "no"
     }
 }
 
@@ -337,44 +286,28 @@ fn cli_list(clis: &[Cli]) -> Option<String> {
     }
 }
 
-fn project_instruction_state(
+fn project_instruction_ok(
     cli: Cli,
     root: &std::path::Path,
     agents: &std::path::Path,
     antigravity_rule: &std::path::Path,
-) -> &'static str {
+) -> bool {
     match cli {
-        Cli::Claude => link_state(&root.join("CLAUDE.md"), agents),
-        Cli::Codex | Cli::Opencode => {
-            if agents.exists() {
-                "direct"
-            } else {
-                "missing"
-            }
-        }
-        Cli::Kiro => link_state(
+        Cli::Claude => link_ok(&root.join("CLAUDE.md"), agents),
+        Cli::Codex | Cli::Opencode => agents.exists(),
+        Cli::Kiro => link_ok(
             &root.join(".kiro").join("steering").join("AGENTS.md"),
             agents,
         ),
-        Cli::Antigravity => antigravity_rule_state(antigravity_rule),
+        Cli::Antigravity => antigravity_rule_ok(antigravity_rule),
     }
 }
 
-fn project_skills_state(
-    cli: Cli,
-    root: &std::path::Path,
-    skills: &std::path::Path,
-) -> &'static str {
+fn project_skills_ok(cli: Cli, root: &std::path::Path, skills: &std::path::Path) -> bool {
     match cli {
-        Cli::Claude => link_state(&root.join(".claude").join("skills"), skills),
-        Cli::Kiro => link_state(&root.join(".kiro").join("skills"), skills),
-        Cli::Codex | Cli::Opencode | Cli::Antigravity => {
-            if skills.exists() {
-                "direct"
-            } else {
-                "missing"
-            }
-        }
+        Cli::Claude => link_ok(&root.join(".claude").join("skills"), skills),
+        Cli::Kiro => link_ok(&root.join(".kiro").join("skills"), skills),
+        Cli::Codex | Cli::Opencode | Cli::Antigravity => skills.exists(),
     }
 }
 
@@ -384,6 +317,12 @@ fn antigravity_rule_state(path: &std::path::Path) -> &'static str {
         Ok(_) => "custom",
         Err(_) => "missing",
     }
+}
+
+fn antigravity_rule_ok(path: &std::path::Path) -> bool {
+    std::fs::read_to_string(path)
+        .map(|text| text.contains("@/AGENTS.md"))
+        .unwrap_or(false)
 }
 
 fn count_dirs(dir: &std::path::Path) -> usize {
@@ -418,6 +357,13 @@ fn startup_state(cli: Cli) -> &'static str {
         Ok(_) => "custom",
         Err(_) => "missing",
     }
+}
+
+fn startup_ok(cli: Cli) -> bool {
+    matches!(
+        startup_state(cli),
+        "hook" | "plugin" | "wrapper" | "mounted" | "written"
+    )
 }
 
 fn antigravity_startup_state() -> &'static str {
@@ -456,18 +402,10 @@ fn count_synced_skill_links(cli_dir: &std::path::Path, store_skills: &std::path:
         .unwrap_or(0)
 }
 
-fn link_state(link: &std::path::Path, want: &std::path::Path) -> &'static str {
-    match link.symlink_metadata() {
-        Ok(m) if m.file_type().is_symlink() => {
-            if std::fs::read_link(link).ok().as_deref() == Some(want) {
-                "linked"
-            } else {
-                "other-link"
-            }
-        }
-        Ok(_) => "real-file",
-        Err(_) => "missing",
-    }
+fn link_ok(link: &std::path::Path, want: &std::path::Path) -> bool {
+    std::fs::read_link(link)
+        .map(|target| target == want)
+        .unwrap_or(false)
 }
 
 fn print_help() {
