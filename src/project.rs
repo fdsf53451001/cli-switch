@@ -29,7 +29,7 @@ pub fn sync(clis: &[Cli], opts: &Options) -> R<Outcome> {
 
     if !agents.exists() {
         return Err(format!(
-            "{} is required for project sync. Create it first, then rerun `agent-sync sync`.",
+            "{} is required for project sync. Create it first, then rerun `cli-switch sync`.",
             agents.display()
         ));
     }

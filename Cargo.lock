@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "agent-sync"
+name = "cli-switch"
 version = "0.1.0"
 dependencies = [
  "serde",

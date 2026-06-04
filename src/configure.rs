@@ -40,7 +40,7 @@ pub fn run(args: &[String]) -> util::R<()> {
     };
     config::save(&cfg)?;
 
-    println!("Configured agent-sync:");
+    println!("Configured cli-switch:");
     println!("  scope: {}", scope.id());
     println!(
         "  clis:  {}",
@@ -116,7 +116,7 @@ fn default_clis() -> Vec<Cli> {
 
 fn prompt_scope(default: Scope) -> util::R<Scope> {
     println!("Sync scope:");
-    println!("  1) global  - sync ~/.config/agent-sync to global CLI config");
+    println!("  1) global  - sync ~/.config/cli-switch to global CLI config");
     println!("  2) project - sync the current directory's AGENTS.md/.agents");
     loop {
         let input = prompt(&format!("Choose scope [{}]: ", default.id()))?;

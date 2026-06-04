@@ -1,4 +1,4 @@
-# agent-sync
+# cli-switch
 
 把 **MCP servers、skills、instructions** 在多個 AI CLI 之間自動同步，並可掛載到各 CLI 啟動時自動執行。
 
@@ -19,7 +19,7 @@
 | Skills | `~/.claude/skills/` | `~/.codex/skills/` | `~/.config/opencode/skills/` | `~/.kiro/skills/` | `~/.gemini/antigravity/skills/` |
 | 指令檔 | `CLAUDE.md` | `AGENTS.md` | `AGENTS.md` | `steering/AGENTS.md` | `GEMINI.md` |
 
-`agent-sync` 用一個**中立的單一真理來源**（`~/.config/agent-sync/`）把這些拉平：MCP 用轉換器產生各家原生格式，skills/instructions 用 symlink。**雙向**——你在任一 CLI 改了，下次同步會合併回來再散播給其他家。
+`cli-switch` 用一個**中立的單一真理來源**（`~/.config/cli-switch/`）把這些拉平：MCP 用轉換器產生各家原生格式，skills/instructions 用 symlink。**雙向**——你在任一 CLI 改了，下次同步會合併回來再散播給其他家。
 
 ---
 
@@ -30,7 +30,7 @@
 ```bash
 cargo build --release
 # 把 binary 放進 PATH（mac/linux）
-install -m755 target/release/agent-sync ~/.local/bin/agent-sync
+install -m755 target/release/cli-switch ~/.local/bin/cli-switch
 ```
 
 跨平台交叉編譯：
@@ -39,7 +39,7 @@ install -m755 target/release/agent-sync ~/.local/bin/agent-sync
 # 在 mac 上產生三平台 binary
 rustup target add x86_64-unknown-linux-gnu x86_64-pc-windows-gnu
 cargo build --release --target x86_64-unknown-linux-gnu
-cargo build --release --target x86_64-pc-windows-gnu     # 產出 agent-sync.exe
+cargo build --release --target x86_64-pc-windows-gnu     # 產出 cli-switch.exe
 ```
 
 ---
@@ -47,26 +47,26 @@ cargo build --release --target x86_64-pc-windows-gnu     # 產出 agent-sync.exe
 ## 使用
 
 ```bash
-agent-sync configure # 互動設定：全域/當前目錄、CLI 清單、啟動自動同步
-agent-sync init      # 建立 ~/.config/agent-sync 真理來源 + config.toml
-agent-sync sync      # 跑一次完整同步（MCP 合併 + skills/instructions 連結）
-agent-sync status    # 看各 CLI 安裝狀態、server 數、連結狀態
-agent-sync mount     # 掛載「啟動時自動同步」到各 CLI
+cli-switch configure # 互動設定：全域/當前目錄、CLI 清單、啟動自動同步
+cli-switch init      # 建立 ~/.config/cli-switch 真理來源 + config.toml
+cli-switch sync      # 跑一次完整同步（MCP 合併 + skills/instructions 連結）
+cli-switch status    # 看各 CLI 安裝狀態、server 數、連結狀態
+cli-switch mount     # 掛載「啟動時自動同步」到各 CLI
 ```
 
 典型首次流程：
 
 ```bash
-agent-sync configure     # 建議使用；會寫 config 並對已安裝 CLI 掛 startup sync
-agent-sync sync          # 把你現有各家設定吸進真理來源並互相散播
-agent-sync status
+cli-switch configure     # 建議使用；會寫 config 並對已安裝 CLI 掛 startup sync
+cli-switch sync          # 把你現有各家設定吸進真理來源並互相散播
+cli-switch status
 ```
 
 非互動設定也可以：
 
 ```bash
-agent-sync configure --scope global --clis installed --yes
-agent-sync configure --scope project --clis claude,codex,kiro --yes
+cli-switch configure --scope global --clis installed --yes
+cli-switch configure --scope project --clis claude,codex,kiro --yes
 ```
 
 `--scope global` 會同步使用者全域設定；`--scope project` 會同步**目前工作目錄**。
@@ -81,7 +81,7 @@ agent-sync configure --scope project --clis claude,codex,kiro --yes
 
 ---
 
-## 真理來源（`~/.config/agent-sync/`）
+## 真理來源（`~/.config/cli-switch/`）
 
 ```
 mcp.json          # 中立格式的 MCP servers（唯一要編輯的 MCP 清單）
@@ -98,7 +98,7 @@ backups/          # 每次寫入前的各 CLI 原檔備份
 
 ## 當前目錄同步（project scope）
 
-`agent-sync configure --scope project` 會把目前目錄設成專案層級同步。這個模式不碰全域 MCP；它把專案內的 instructions/skills 拉成同一份：
+`cli-switch configure --scope project` 會把目前目錄設成專案層級同步。這個模式不碰全域 MCP；它把專案內的 instructions/skills 拉成同一份：
 
 ```
 AGENTS.md          # 專案指令檔 SSOT，必須先存在
@@ -116,7 +116,7 @@ AGENTS.md          # 專案指令檔 SSOT，必須先存在
 | Kiro | `.kiro/steering/AGENTS.md -> AGENTS.md` | `.kiro/skills -> .agents/skills` |
 | Antigravity | 建立 `.agents/rules/agents-root.md`，內容 `@/AGENTS.md` | 直接使用 `.agents/skills` |
 
-如果目標位置已經有真實檔案或目錄，`agent-sync` 只會報衝突，不會覆蓋；先手動 merge 到 `AGENTS.md` 或 `.agents/skills/` 後再重跑。
+如果目標位置已經有真實檔案或目錄，`cli-switch` 只會報衝突，不會覆蓋；先手動 merge 到 `AGENTS.md` 或 `.agents/skills/` 後再重跑。
 
 ---
 
@@ -140,8 +140,8 @@ AGENTS.md          # 專案指令檔 SSOT，必須先存在
 |-----|------|--------|
 | Claude Code | `settings.json` 的 `SessionStart` hook | ✅ 原生、穩定 |
 | Codex | `~/.codex/hooks.json` 的 SessionStart | ⚠️ 實驗性，需 `codex /hooks` 核准 |
-| opencode | `~/.config/opencode/plugin/agent-sync.js` | ⚠️ 實驗性，plugin 事件名稱可能改版 |
-| Kiro / Antigravity | 無原生 startup hook → 產生 shell wrapper（`~/.config/agent-sync/shell-init.sh`） | ⚠️ 僅終端機啟動；GUI/Dock 啟動需改用定時同步 |
+| opencode | `~/.config/opencode/plugin/cli-switch.js` | ⚠️ 實驗性，plugin 事件名稱可能改版 |
+| Kiro / Antigravity | 無原生 startup hook → 產生 shell wrapper（`~/.config/cli-switch/shell-init.sh`） | ⚠️ 僅終端機啟動；GUI/Dock 啟動需改用定時同步 |
 
 `mount` 會自動偵測既有設定並**就地合併**（不會覆蓋你 Claude 既有的其他 hook），且重複執行不會疊加。
 

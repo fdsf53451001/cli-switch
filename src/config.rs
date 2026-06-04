@@ -89,8 +89,8 @@ pub fn save(cfg: &Config) -> R<()> {
         .collect::<Vec<_>>()
         .join(", ");
     let body = format!(
-        r#"# agent-sync configuration.
-# scope = "global" syncs ~/.config/agent-sync to global CLI config.
+        r#"# cli-switch configuration.
+# scope = "global" syncs ~/.config/cli-switch to global CLI config.
 # scope = "project" syncs the current directory's AGENTS.md/.agents to project-local CLI files.
 scope = "{}"
 

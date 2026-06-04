@@ -1,11 +1,11 @@
 [package]
-name = "agent-sync"
+name = "cli-switch"
 version = "0.1.0"
 edition = "2021"
 description = "Sync MCP servers, skills, and instructions across AI CLIs (Claude Code, Codex, opencode, Kiro, Antigravity)"
 
 [[bin]]
-name = "agent-sync"
+name = "cli-switch"
 path = "src/main.rs"
 
 [dependencies]

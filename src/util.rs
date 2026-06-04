@@ -40,8 +40,8 @@ pub fn write_atomic(path: &Path, contents: &str) -> R<()> {
 
 fn tmp_ext(path: &Path) -> String {
     match path.extension().and_then(|e| e.to_str()) {
-        Some(ext) => format!("{ext}.agentsync-tmp"),
-        None => "agentsync-tmp".to_string(),
+        Some(ext) => format!("{ext}.cli-switch-tmp"),
+        None => "cli-switch-tmp".to_string(),
     }
 }
 

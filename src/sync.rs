@@ -28,7 +28,7 @@ pub fn run(opts: &Options) -> R<()> {
             Some(l) => Some(l),
             None => {
                 if !opts.quiet {
-                    println!("Another agent-sync run is in progress — skipping.");
+                    println!("Another cli-switch run is in progress — skipping.");
                 }
                 return Ok(());
             }

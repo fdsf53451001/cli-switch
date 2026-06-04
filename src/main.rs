@@ -1,4 +1,4 @@
-//! agent-sync — keep MCP servers, skills, and instructions in sync across
+//! cli-switch — keep MCP servers, skills, and instructions in sync across
 //! Claude Code, Codex, opencode, Kiro, and Antigravity.
 
 mod adapters;
@@ -24,7 +24,7 @@ fn main() {
     let code = match dispatch(&args) {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("agent-sync: error: {e}");
+            eprintln!("cli-switch: error: {e}");
             1
         }
     };
@@ -41,14 +41,14 @@ fn dispatch(args: &[String]) -> R<()> {
         "configure" | "config" => configure::run(rest),
         "init" => cmd_init(),
         "-V" | "--version" | "version" => {
-            println!("agent-sync {VERSION}");
+            println!("cli-switch {VERSION}");
             Ok(())
         }
         "-h" | "--help" | "help" => {
             print_help();
             Ok(())
         }
-        other => Err(format!("unknown command '{other}' (try `agent-sync help`)")),
+        other => Err(format!("unknown command '{other}' (try `cli-switch help`)")),
     }
 }
 
@@ -71,7 +71,7 @@ fn cmd_init() -> R<()> {
         config::write_default()?;
     }
     println!(
-        "Initialized agent-sync store at {}",
+        "Initialized cli-switch store at {}",
         paths::store_root().display()
     );
     println!("  canonical MCP:   {}", paths::store_mcp().display());
@@ -81,7 +81,7 @@ fn cmd_init() -> R<()> {
     );
     println!("  skills/:         {}", paths::store_skills().display());
     println!("  config:          {}", paths::store_config().display());
-    println!("\nNext: `agent-sync sync` to pull existing config in, then `agent-sync mount` to auto-sync on startup.");
+    println!("\nNext: `cli-switch sync` to pull existing config in, then `cli-switch mount` to auto-sync on startup.");
     Ok(())
 }
 
@@ -114,7 +114,7 @@ fn cmd_status() -> R<()> {
     let cfg = config::load()?;
     let canonical = store::load_canonical()?;
 
-    println!("agent-sync {VERSION}");
+    println!("cli-switch {VERSION}");
     println!("store: {}", paths::store_root().display());
     println!("scope: {}", cfg.scope.id());
     println!(
@@ -153,7 +153,7 @@ fn cmd_status() -> R<()> {
 
     println!();
     if canonical.servers.is_empty() {
-        println!("No canonical MCP servers yet. Run `agent-sync sync` to import existing ones.");
+        println!("No canonical MCP servers yet. Run `cli-switch sync` to import existing ones.");
     } else {
         println!("Canonical MCP servers:");
         for (name, s) in &canonical.servers {
@@ -218,14 +218,14 @@ fn link_state(link: &std::path::Path, want: &std::path::Path) -> &'static str {
 
 fn print_help() {
     println!(
-        r#"agent-sync {VERSION} — sync MCP servers, skills & instructions across AI CLIs
+        r#"cli-switch {VERSION} — sync MCP servers, skills & instructions across AI CLIs
 
 USAGE:
-    agent-sync <command> [options]
+    cli-switch <command> [options]
 
 COMMANDS:
     configure       Interactive setup: choose global/project scope, CLIs, and startup sync
-    init            Create the canonical store (~/.config/agent-sync) and config
+    init            Create the canonical store (~/.config/cli-switch) and config
     sync            Run a full sync (MCP merge + skills/instructions links)
         --prune       remove servers gone from every CLI (default: keep + warn)
         --dry-run     show what would change without writing
@@ -236,7 +236,7 @@ COMMANDS:
 
 CLIs: claude, codex, opencode, kiro, antigravity
 
-Global sync store at ~/.config/agent-sync:
+Global sync store at ~/.config/cli-switch:
     mcp.json        canonical MCP servers (neutral format)
     AGENTS.md       shared instructions (symlinked into every CLI)
     skills/         shared SKILL.md folders (symlinked into every CLI)

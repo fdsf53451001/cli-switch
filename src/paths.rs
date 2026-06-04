@@ -22,12 +22,12 @@ pub fn home() -> PathBuf {
     PathBuf::from(".")
 }
 
-/// Canonical store root: `~/.config/agent-sync` (override with AGENT_SYNC_HOME).
+/// Canonical store root: `~/.config/cli-switch` (override with CLI_SWITCH_HOME).
 pub fn store_root() -> PathBuf {
-    if let Some(custom) = std::env::var_os("AGENT_SYNC_HOME") {
+    if let Some(custom) = std::env::var_os("CLI_SWITCH_HOME") {
         return PathBuf::from(custom);
     }
-    home().join(".config").join("agent-sync")
+    home().join(".config").join("cli-switch")
 }
 
 pub fn store_mcp() -> PathBuf {
@@ -116,5 +116,5 @@ pub fn opencode_plugin() -> PathBuf {
         .join(".config")
         .join("opencode")
         .join("plugin")
-        .join("agent-sync.js")
+        .join("cli-switch.js")
 }
