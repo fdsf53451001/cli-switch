@@ -1,5 +1,4 @@
-//! `<store>/config.toml` — which CLIs and which features to sync. Missing file
-//! means "all installed CLIs, all features".
+//! `<store>/config.toml` — which CLIs and which features to sync.
 
 use crate::adapters;
 use crate::model::Cli;
@@ -50,6 +49,9 @@ impl Default for Config {
 }
 
 pub fn load() -> R<Config> {
+    if util::read_to_string_opt(&paths::store_config())?.is_none() {
+        return Ok(disabled_global());
+    }
     load_from(&paths::store_config(), Scope::Global)
 }
 
@@ -106,6 +108,16 @@ fn default_for_scope(scope: Scope) -> Config {
         scope,
         mcp: scope == Scope::Global,
         ..Config::default()
+    }
+}
+
+fn disabled_global() -> Config {
+    Config {
+        scope: Scope::Global,
+        clis: Vec::new(),
+        mcp: true,
+        skills: true,
+        instructions: true,
     }
 }
 

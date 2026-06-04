@@ -35,7 +35,6 @@ fn dispatch(args: &[String]) -> R<()> {
     let (cmd, rest) = match args.first().map(|s| s.as_str()) {
         None => ("configure", &args[0..]),
         Some("-h" | "--help" | "-V" | "--version") => (args[0].as_str(), &args[1..]),
-        Some(first) if is_configure_option(first) => ("configure", args),
         Some(first) => (first, &args[1..]),
     };
     match cmd {
@@ -54,16 +53,6 @@ fn dispatch(args: &[String]) -> R<()> {
         }
         other => Err(format!("unknown command '{other}' (try `cli-switch help`)")),
     }
-}
-
-fn is_configure_option(arg: &str) -> bool {
-    arg == "--yes"
-        || arg == "-y"
-        || arg == "--no-mount"
-        || arg == "--scope"
-        || arg.starts_with("--scope=")
-        || arg == "--clis"
-        || arg.starts_with("--clis=")
 }
 
 fn has_flag(args: &[String], flag: &str) -> bool {
@@ -161,7 +150,7 @@ pub(crate) fn print_status() -> R<()> {
         None => {
             println!("project: {}", paths::project_root().display());
             println!("state: not joined");
-            println!("Run `cli-switch` and enable project sync for this directory to join.");
+            println!("Run `cli-switch` and choose `3) set project level` to join.");
             Ok(())
         }
     }
@@ -450,10 +439,10 @@ fn print_help() {
         r#"cli-switch {VERSION} — sync MCP servers, skills & instructions across AI CLIs
 
 USAGE:
-    cli-switch [command] [options]
+    cli-switch [command]
 
 COMMANDS:
-    configure       Interactive setup; default when no command is given
+    configure       Open the setup menu; default when no command is given
     init            Create the canonical store (~/.config/cli-switch) and config
     sync            Run a full sync (MCP merge + skills/instructions links)
         --prune       remove servers gone from every CLI (default: keep + warn)
@@ -475,6 +464,8 @@ Project sync uses the current directory:
     AGENTS.md       project instructions source of truth
     .agents/skills/ shared project skills
     .agents/rules/  Antigravity rule files
+
+Run `cli-switch configure --help` for non-interactive setup options.
 "#
     );
 }

@@ -7,28 +7,54 @@ use crate::{mount, paths, project, store, sync, util};
 use std::io::{self, Write};
 
 pub fn run(args: &[String]) -> util::R<()> {
+    if has_flag(args, "--help") || has_flag(args, "-h") {
+        print_help();
+        return Ok(());
+    }
+
     let scope_arg = arg_value(args, "--scope").and_then(|s| Scope::from_id(&s));
     if scope_arg == Some(Scope::Project) {
         configure_project(args, true)?;
         return finish();
     }
-    if scope_arg == Some(Scope::Global) || has_flag(args, "--yes") || has_flag(args, "-y") {
+    if scope_arg == Some(Scope::Global) {
         configure_global(args, true)?;
         return finish();
     }
-
-    if prompt_yes_no("Configure global sync", true)? {
-        configure_global(args, false)?;
+    if has_flag(args, "--yes") || has_flag(args, "-y") {
+        return Err("`--yes` needs an explicit scope: `cli-switch configure --scope global --yes` or `cli-switch configure --scope project --yes`".to_string());
     }
 
-    let joined = config::project_joined();
-    if prompt_yes_no("Enable project sync for this directory", joined)? {
-        configure_project(args, false)?;
-    } else if joined {
-        leave_project()?;
-    }
+    run_menu()
+}
 
-    finish()
+fn run_menu() -> util::R<()> {
+    loop {
+        println!("cli-switch");
+        println!("  1) setup cli");
+        println!("  2) set global level");
+        println!("  3) set project level");
+        println!("  4) remove cli");
+        println!("  5) remove global level");
+        println!("  6) remove project level");
+        println!();
+
+        match prompt("Choose [1-6]: ")?.trim() {
+            "1" => return setup_cli(),
+            "2" => {
+                configure_global(&[], false)?;
+                return finish();
+            }
+            "3" => {
+                configure_project(&[], false)?;
+                return finish();
+            }
+            "4" => return remove_cli(),
+            "5" => return remove_global_level(),
+            "6" => return remove_project_level(),
+            _ => println!("Please enter 1, 2, 3, 4, 5, or 6."),
+        }
+    }
 }
 
 fn configure_global(args: &[String], no_prompt: bool) -> util::R<Vec<Cli>> {
@@ -38,7 +64,6 @@ fn configure_global(args: &[String], no_prompt: bool) -> util::R<Vec<Cli>> {
         Some(raw) => Some(parse_cli_selection(&raw, &[])?),
         None => None,
     };
-    let no_mount = has_flag(args, "--no-mount");
 
     let default_clis = if has_config {
         existing.clis.clone()
@@ -49,7 +74,7 @@ fn configure_global(args: &[String], no_prompt: bool) -> util::R<Vec<Cli>> {
     let clis = match (clis_arg, no_prompt) {
         (Some(clis), _) => clis,
         (None, true) => default_clis,
-        (None, false) => prompt_clis(&default_clis)?,
+        (None, false) => prompt_clis("Sync which CLIs globally?", &default_clis)?,
     };
 
     store::ensure_scaffold()?;
@@ -70,23 +95,6 @@ fn configure_global(args: &[String], no_prompt: bool) -> util::R<Vec<Cli>> {
     );
     println!("  config: {}", paths::store_config().display());
 
-    if !no_mount {
-        let installed = clis
-            .iter()
-            .copied()
-            .filter(|&cli| adapters::installed(cli))
-            .collect::<Vec<_>>();
-        if installed.is_empty() {
-            println!("No selected CLI is installed; startup auto-sync was not mounted.");
-        } else {
-            let report = mount::mount(&installed)?;
-            println!("Mounted startup auto-sync:");
-            for line in report.lines {
-                println!("  [+] {line}");
-            }
-        }
-    }
-
     Ok(clis)
 }
 
@@ -102,12 +110,11 @@ fn configure_project(args: &[String], no_prompt: bool) -> util::R<Vec<Cli>> {
         Some(raw) => Some(parse_cli_selection(&raw, &[])?),
         None => None,
     };
-    let no_mount = has_flag(args, "--no-mount");
 
     let clis = match (clis_arg, no_prompt) {
         (Some(clis), _) => clis,
         (None, true) => existing.clis,
-        (None, false) => prompt_clis(&existing.clis)?,
+        (None, false) => prompt_clis("Sync which CLIs for this project?", &existing.clis)?,
     };
 
     util::ensure_dir(&paths::project_config_dir())?;
@@ -128,22 +135,92 @@ fn configure_project(args: &[String], no_prompt: bool) -> util::R<Vec<Cli>> {
     );
     println!("  config:  {}", paths::project_config().display());
 
-    if !no_mount {
-        let installed = clis
-            .iter()
-            .copied()
-            .filter(|&cli| adapters::installed(cli))
-            .collect::<Vec<_>>();
-        if !installed.is_empty() {
-            let report = mount::mount(&installed)?;
-            println!("Mounted startup auto-sync:");
-            for line in report.lines {
-                println!("  [+] {line}");
-            }
+    Ok(clis)
+}
+
+fn setup_cli() -> util::R<()> {
+    let default = configured_clis()?;
+    let default = if default.is_empty() {
+        installed_clis()
+    } else {
+        default
+    };
+    let clis = prompt_clis("Setup startup sync for which CLIs?", &default)?;
+    let installed = clis
+        .iter()
+        .copied()
+        .filter(|&cli| adapters::installed(cli))
+        .collect::<Vec<_>>();
+
+    if installed.is_empty() {
+        println!("No selected CLI is installed; nothing was mounted.");
+    } else {
+        let report = mount::mount(&installed)?;
+        println!("Mounted startup auto-sync:");
+        for line in report.lines {
+            println!("  [+] {line}");
         }
     }
 
-    Ok(clis)
+    println!();
+    println!("Current status:");
+    crate::print_status()?;
+    Ok(())
+}
+
+fn remove_cli() -> util::R<()> {
+    let default = configured_clis()?;
+    if default.is_empty() {
+        println!("No CLI is configured.");
+        return Ok(());
+    }
+
+    let clis = prompt_clis("Remove which CLIs from cli-switch?", &default)?;
+    let mut global_cfg = config::load()?;
+    global_cfg.clis.retain(|cli| !clis.contains(cli));
+    config::save(&global_cfg)?;
+
+    if let Some(mut project_cfg) = config::load_project()? {
+        project_cfg.clis.retain(|cli| !clis.contains(cli));
+        config::save_project(&project_cfg)?;
+    }
+
+    let report = mount::unmount(&clis)?;
+    println!("Removed CLI sync:");
+    println!(
+        "  clis: {}",
+        clis.iter().map(|c| c.id()).collect::<Vec<_>>().join(", ")
+    );
+    for line in report.lines {
+        println!("  [-] {line}");
+    }
+
+    finish()
+}
+
+fn remove_global_level() -> util::R<()> {
+    let cfg = Config {
+        scope: Scope::Global,
+        clis: Vec::new(),
+        mcp: true,
+        skills: true,
+        instructions: true,
+    };
+    store::ensure_scaffold()?;
+    config::save(&cfg)?;
+    println!("Removed global level:");
+    println!("  config: {}", paths::store_config().display());
+    println!("  kept:   canonical MCP, AGENTS.md, skills, state, backups");
+    finish()
+}
+
+fn remove_project_level() -> util::R<()> {
+    if config::project_joined() {
+        leave_project()?;
+    } else {
+        println!("Project level is not enabled for this directory.");
+    }
+    finish()
 }
 
 fn leave_project() -> util::R<()> {
@@ -194,9 +271,21 @@ fn installed_clis() -> Vec<Cli> {
         .collect()
 }
 
-fn prompt_clis(default: &[Cli]) -> util::R<Vec<Cli>> {
+fn configured_clis() -> util::R<Vec<Cli>> {
+    let mut out = config::load()?.clis;
+    if let Some(project_cfg) = config::load_project()? {
+        for cli in project_cfg.clis {
+            if !out.contains(&cli) {
+                out.push(cli);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn prompt_clis(title: &str, default: &[Cli]) -> util::R<Vec<Cli>> {
     println!();
-    println!("Install/sync which CLIs?");
+    println!("{title}");
     let mut out = Vec::new();
     for cli in Cli::ALL {
         let installed = adapters::installed(cli);
@@ -214,7 +303,7 @@ fn prompt_clis(default: &[Cli]) -> util::R<Vec<Cli>> {
     }
     if out.is_empty() {
         println!("Select at least one CLI.");
-        return prompt_clis(default);
+        return prompt_clis(title, default);
     }
     Ok(out)
 }
@@ -284,4 +373,25 @@ fn prompt(message: &str) -> util::R<String> {
         .read_line(&mut input)
         .map_err(|e| e.to_string())?;
     Ok(input)
+}
+
+fn print_help() {
+    println!(
+        r#"Usage:
+    cli-switch configure [--scope global|project --clis <list> --yes]
+
+Without options, configure opens this menu:
+    1) setup cli
+    2) set global level
+    3) set project level
+    4) remove cli
+    5) remove global level
+    6) remove project level
+
+Examples:
+    cli-switch
+    cli-switch configure --scope global --clis claude,codex --yes
+    cli-switch configure --scope project --clis installed --yes
+"#
+    );
 }

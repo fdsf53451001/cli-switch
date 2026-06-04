@@ -11,6 +11,7 @@ use crate::model::Cli;
 use crate::paths;
 use crate::util::{self, R};
 use serde_json::{json, Map, Value};
+use std::fs;
 
 pub struct MountReport {
     pub lines: Vec<String>,
@@ -41,6 +42,110 @@ pub fn mount(clis: &[Cli]) -> R<MountReport> {
     }
 
     Ok(MountReport { lines })
+}
+
+pub fn unmount(clis: &[Cli]) -> R<MountReport> {
+    let mut lines = Vec::new();
+
+    for &cli in clis {
+        match cli {
+            Cli::Claude => lines.push(remove_hook_group(
+                &paths::claude_settings(),
+                "SessionStart",
+                "claude",
+            )?),
+            Cli::Codex => lines.push(remove_hook_group(
+                &paths::codex_hooks(),
+                "SessionStart",
+                "codex",
+            )?),
+            Cli::Opencode => lines.push(remove_generated_file(
+                &paths::opencode_plugin(),
+                "opencode plugin",
+            )?),
+            Cli::Antigravity => lines.push(remove_antigravity_hook()?),
+            Cli::Kiro => lines.push(remove_generated_file(
+                &paths::shell_init(),
+                "kiro shell init",
+            )?),
+        }
+    }
+
+    Ok(MountReport { lines })
+}
+
+fn remove_hook_group(path: &std::path::Path, event: &str, label: &str) -> R<String> {
+    let Some(text) = util::read_to_string_opt(path)? else {
+        return Ok(format!("{label}: no hook file"));
+    };
+    if text.trim().is_empty() {
+        return Ok(format!("{label}: hook file is empty"));
+    }
+
+    let mut root: Value = serde_json::from_str(&text).map_err(|e| util::ctx(path, e))?;
+    let Some(groups) = root
+        .get_mut("hooks")
+        .and_then(|hooks| hooks.get_mut(event))
+        .and_then(|value| value.as_array_mut())
+    else {
+        return Ok(format!("{label}: no cli-switch hook"));
+    };
+
+    let before = groups.len();
+    groups.retain(|g| !group_mentions(g, "cli-switch") && !group_mentions(g, "agent-sync"));
+    if groups.len() == before {
+        return Ok(format!("{label}: no cli-switch hook"));
+    }
+
+    let out = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    util::write_atomic(path, &out)?;
+    Ok(format!("{label}: hook removed -> {}", path.display()))
+}
+
+fn remove_generated_file(path: &std::path::Path, label: &str) -> R<String> {
+    let Some(text) = util::read_to_string_opt(path)? else {
+        return Ok(format!("{label}: no file"));
+    };
+    if !text.contains("cli-switch") && !text.contains("__cli_switch_run") {
+        return Ok(format!(
+            "{label}: custom file left unchanged -> {}",
+            path.display()
+        ));
+    }
+    fs::remove_file(path).map_err(|e| util::ctx(path, e))?;
+    Ok(format!("{label}: removed -> {}", path.display()))
+}
+
+fn remove_antigravity_hook() -> R<String> {
+    let path = paths::antigravity_hooks();
+    let Some(text) = util::read_to_string_opt(&path)? else {
+        return Ok("antigravity: no hook file".to_string());
+    };
+    if text.trim().is_empty() {
+        return Ok("antigravity: hook file is empty".to_string());
+    }
+
+    let mut root: Value = serde_json::from_str(&text).map_err(|e| util::ctx(&path, e))?;
+    let Some(obj) = root.as_object_mut() else {
+        return Ok(format!(
+            "antigravity: custom hook file left unchanged -> {}",
+            path.display()
+        ));
+    };
+    let before = obj.len();
+    obj.retain(|name, val| {
+        !name.contains("cli-switch")
+            && !name.contains("agent-sync")
+            && !value_mentions(val, "cli-switch")
+            && !value_mentions(val, "agent-sync")
+    });
+    if obj.len() == before {
+        return Ok("antigravity: no cli-switch hook".to_string());
+    }
+
+    let out = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    util::write_atomic(&path, &out)?;
+    Ok(format!("antigravity: hook removed -> {}", path.display()))
 }
 
 // ───────────────────────── Claude ─────────────────────────

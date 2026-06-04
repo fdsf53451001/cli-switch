@@ -47,7 +47,7 @@ cargo build --release --target x86_64-pc-windows-gnu     # 產出 cli-switch.exe
 ## 使用
 
 ```bash
-cli-switch           # 互動設定：全域同步 + 目前資料夾專案同步
+cli-switch           # 開啟互動主選單
 cli-switch configure # 同上
 cli-switch init      # 建立 ~/.config/cli-switch 真理來源 + config.toml
 cli-switch sync      # 跑一次完整同步（全域 + 已加入的目前資料夾）
@@ -58,7 +58,18 @@ cli-switch mount     # 掛載「啟動時自動同步」到各 CLI
 典型首次流程：
 
 ```bash
-cli-switch     # 寫 config、掛 startup sync、立即同步一次並顯示 status
+cli-switch
+```
+
+互動主選單：
+
+```text
+1) setup cli             # 安裝/更新各 CLI 的 startup sync hook
+2) set global level      # 啟用/更新使用者全域同步
+3) set project level     # 啟用/更新目前資料夾專案同步
+4) remove cli            # 從設定移除 CLI，並移除 cli-switch startup hook
+5) remove global level   # 停用全域同步，保留 canonical store
+6) remove project level  # 退出目前資料夾專案同步
 ```
 
 非互動設定也可以：
@@ -70,7 +81,7 @@ cli-switch configure --scope project --clis claude,codex --yes # 只加入/更�
 
 全域同步和專案同步可以並存：全域設定存在 `~/.config/cli-switch/config.toml`，每個已加入的資料夾會有自己的 `.cli-switch/config.toml`。
 
-互動模式會先問是否設定全域同步，再問目前資料夾是否加入專案同步；設定完成後會立即同步一次並顯示 status。非互動模式仍可用 `--clis installed`、`--clis all` 或 `--clis claude,codex`。
+互動模式一律先進主選單，不會把 `--help`、`--version` 或未知 top-level flag 吃進 configure。非互動模式必須明確使用 `configure` 子命令，並可用 `--clis installed`、`--clis all` 或 `--clis claude,codex`。
 
 ### sync 選項
 
