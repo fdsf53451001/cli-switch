@@ -27,17 +27,15 @@ pub fn sync(clis: &[Cli], opts: &Options) -> R<Outcome> {
     let rules = root.join(".agents").join("rules");
     let mut out = Outcome::default();
 
-    if !agents.exists() {
-        return Err(format!(
-            "{} is required for project sync. Create it first, then rerun `cli-switch sync`.",
-            agents.display()
-        ));
-    }
-
     if !opts.dry_run {
+        ensure_agents_file(&agents, &mut out)?;
         util::ensure_dir(&skills)?;
         util::ensure_dir(&rules)?;
     } else {
+        if !agents.exists() {
+            out.actions
+                .push(format!("would create {}", agents.display()));
+        }
         out.actions
             .push(format!("would ensure {}", skills.display()));
         out.actions
@@ -52,6 +50,18 @@ pub fn sync(clis: &[Cli], opts: &Options) -> R<Outcome> {
     }
 
     Ok(out)
+}
+
+fn ensure_agents_file(path: &Path, out: &mut Outcome) -> R<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    util::write_atomic(
+        path,
+        "# Project agent instructions\n\nAdd shared instructions for AI coding agents in this project.\n",
+    )?;
+    out.actions.push(format!("created {}", path.display()));
+    Ok(())
 }
 
 fn sync_instructions(

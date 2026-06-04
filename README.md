@@ -111,7 +111,7 @@ backups/          # 每次寫入前的各 CLI 原檔備份
 `cli-switch configure --scope project` 會把目前目錄設成專案層級同步。這個模式不碰全域 MCP；它把專案內的 instructions/skills 拉成同一份：
 
 ```
-AGENTS.md          # 專案指令檔 SSOT，必須先存在
+AGENTS.md          # 專案指令檔 SSOT；不存在時會自動建立
 .agents/skills/    # 專案共用 skills
 .agents/rules/     # Antigravity rules
 ```
