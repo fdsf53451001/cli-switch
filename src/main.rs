@@ -137,22 +137,25 @@ pub(crate) fn print_status() -> R<()> {
 
 fn status_global(cfg: &config::Config) -> R<()> {
     let canonical = store::load_canonical()?;
+    let canonical_skill_count = count_dirs(&paths::store_skills());
     println!(
         "canonical: {} MCP server(s), instructions={}, skills={}",
         canonical.servers.len(),
         yn(paths::store_instructions().exists()),
-        count_dirs(&paths::store_skills())
+        canonical_skill_count
     );
     println!();
     println!(
         "{:<13} {:<8} {:<10} {:<7} {:<13} {:<8} {:<10}",
-        "CLI", "sync", "installed", "mcp", "instructions", "skills", "startup"
+        "CLI", "state", "installed", "mcp", "instructions", "skills", "startup"
     );
     println!("{}", "-".repeat(78));
 
     for cli in Cli::ALL {
         let installed = adapters::installed(cli);
         let configured = cfg.clis.contains(&cli);
+        let active = configured && installed;
+        let state = global_sync_state(configured, installed);
         let mcp_n = if configured && installed {
             adapters::read_mcp(cli)
                 .map(|m| m.len().to_string())
@@ -160,20 +163,28 @@ fn status_global(cfg: &config::Config) -> R<()> {
         } else {
             "-".to_string()
         };
-        let instr = if configured {
+        let instr = if active {
             link_state(&paths::instructions_file(cli), &paths::store_instructions())
+        } else if configured {
+            "skipped"
         } else {
             "off"
         };
-        let skills = if configured {
-            count_links(&paths::skills_dir(cli)).to_string()
+        let skills = if active {
+            format!(
+                "{}/{}",
+                count_synced_skill_links(&paths::skills_dir(cli), &paths::store_skills()),
+                canonical_skill_count
+            )
+        } else if configured {
+            "skipped".to_string()
         } else {
             "-".to_string()
         };
         println!(
             "{:<13} {:<8} {:<10} {:<7} {:<13} {:<8} {:<10}",
             cli.id(),
-            yn(configured),
+            state,
             yn(installed),
             mcp_n,
             instr,
@@ -197,6 +208,14 @@ fn status_global(cfg: &config::Config) -> R<()> {
         }
     }
     Ok(())
+}
+
+fn global_sync_state(configured: bool, installed: bool) -> &'static str {
+    match (configured, installed) {
+        (true, true) => "active",
+        (true, false) => "skipped",
+        (false, _) => "off",
+    }
 }
 
 fn status_project(cfg: &config::Config) -> R<()> {
@@ -324,21 +343,6 @@ fn count_dirs(dir: &std::path::Path) -> usize {
         .unwrap_or(0)
 }
 
-fn count_links(dir: &std::path::Path) -> usize {
-    std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.flatten()
-                .filter(|e| {
-                    e.path()
-                        .symlink_metadata()
-                        .map(|m| m.file_type().is_symlink())
-                        .unwrap_or(false)
-                })
-                .count()
-        })
-        .unwrap_or(0)
-}
-
 fn startup_state(cli: Cli) -> &'static str {
     let path = match cli {
         Cli::Claude => paths::claude_settings(),
@@ -351,6 +355,23 @@ fn startup_state(cli: Cli) -> &'static str {
         Ok(_) => "custom",
         Err(_) => "missing",
     }
+}
+
+fn count_synced_skill_links(cli_dir: &std::path::Path, store_skills: &std::path::Path) -> usize {
+    std::fs::read_dir(store_skills)
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| e.path().is_dir())
+                .filter(|e| {
+                    let name = e.file_name();
+                    let link = cli_dir.join(&name);
+                    std::fs::read_link(link)
+                        .map(|target| target == e.path())
+                        .unwrap_or(false)
+                })
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 fn link_state(link: &std::path::Path, want: &std::path::Path) -> &'static str {

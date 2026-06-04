@@ -86,6 +86,9 @@ cli-switch configure --scope project --clis claude,codex,kiro --yes
 - `global`：canonical store、每個 CLI 是否啟用、是否安裝、MCP 數量、instructions/skills 連結狀態、startup hook 狀態。
 - `project`：目前目錄是否有 `AGENTS.md`、`.agents/skills`、Antigravity rule，以及每個 CLI 的 project instructions/skills 是否已連好。
 
+Global status 的 `state` 欄位中，`active` 代表已選且已安裝、`skipped` 代表已選但本機未安裝、`off` 代表未選。
+Global status 的 `skills` 欄位是 `synced/expected`，只計算 cli-switch canonical skills 的 symlink，不計入 CLI 目錄裡其他既有 symlink。
+
 ---
 
 ## 真理來源（`~/.config/cli-switch/`）
