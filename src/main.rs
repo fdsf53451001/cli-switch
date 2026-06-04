@@ -1,5 +1,5 @@
 //! cli-switch — keep MCP servers, skills, and instructions in sync across
-//! Claude Code, Codex, opencode, Kiro, and Antigravity.
+//! Claude Code, Codex, opencode, Kiro, Antigravity, and GitHub Copilot.
 
 mod adapters;
 mod config;
@@ -338,7 +338,7 @@ fn count_dirs(dir: &std::path::Path) -> usize {
 
 fn startup_state(cli: Cli) -> &'static str {
     if matches!(cli, Cli::Kiro) {
-        return shell_startup_state();
+        return kiro_startup_state();
     }
     if matches!(cli, Cli::Antigravity) {
         return antigravity_startup_state();
@@ -373,6 +373,21 @@ fn antigravity_startup_state() -> &'static str {
         Ok(_) => "custom",
         Err(_) => "missing",
     }
+}
+
+fn kiro_startup_state() -> &'static str {
+    // Native agentSpawn hook injected into the default agent wins; otherwise
+    // fall back to reporting the shell wrapper state.
+    if let Some(path) = mount::kiro_default_agent_path() {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if text.contains("agentSpawn")
+                && (text.contains("cli-switch") || text.contains("agent-sync"))
+            {
+                return "hook";
+            }
+        }
+    }
+    shell_startup_state()
 }
 
 fn shell_startup_state() -> &'static str {

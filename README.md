@@ -189,13 +189,13 @@ AGENTS.md          # 專案指令檔 SSOT；不存在時會自動建立
 | Claude Code | `settings.json` 的 `SessionStart` hook | ✅ 原生、穩定 |
 | Codex | `~/.codex/hooks.json` 的 SessionStart | ⚠️ 實驗性，需 `codex /hooks` 核准 |
 | opencode | `~/.config/opencode/plugin/cli-switch.js` | ⚠️ 實驗性，plugin 事件名稱可能改版 |
-| Kiro | 無原生 startup hook → 產生 shell wrapper（`~/.config/cli-switch/shell-init.sh`） | ⚠️ 需手動 source 到 shell rc |
+| Kiro | 原生 `agentSpawn` hook 注入 default agent（`~/.kiro/agents/<default>.json`）；無 default agent 時 fallback shell wrapper | ✅ 有 default agent 時原生；否則需手動 source wrapper |
 | Antigravity CLI (`agy`) | `~/.gemini/config/hooks.json` 的 `PreInvocation` hook | ✅ 原生 hook；每次模型呼叫前同步 |
 | GitHub Copilot CLI (`copilot`) | `~/.copilot/hooks/cli-switch.json` 的 `sessionStart` hook | ✅ 原生 hook；每次 session 啟動時同步 |
 
 `mount` 會自動偵測既有設定並**就地合併**（不會覆蓋你 Claude 既有的其他 hook），且重複執行不會疊加。
 
-Kiro 目前沒有像 Claude/Codex 那樣的 startup hook。`mount` 會產生 shell wrapper，讓從終端機啟動時先同步；需要手動把 `source ~/.config/cli-switch/shell-init.sh` 放進 shell rc。
+Kiro CLI 有原生 `agentSpawn` hook，但它綁在單一 agent 上（沒有全域 hook，內建 `kiro_default` 沒有可寫的檔）。`mount` 會讀 `~/.kiro/settings/cli.json` 的 `chat.defaultAgent`，把 `cli-switch sync --quiet` 外科手術式注入那個 agent 的 `hooks.agentSpawn`（保留其餘設定、重複執行不疊加；用 `--quiet` 讓 stdout 為空，不污染 agent context）。沒有設定 default agent 時，fallback 成 shell wrapper，需手動把 `source ~/.config/cli-switch/shell-init.sh` 放進 shell rc。
 
 Antigravity CLI (`agy`) 使用官方 hooks：`mount` 會在 `~/.gemini/config/hooks.json` 寫入 `cli-switch-sync`，掛到 `PreInvocation`，讓每次模型呼叫前先同步。
 

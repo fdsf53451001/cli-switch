@@ -5,7 +5,11 @@
 //!   `codex /hooks` approval — marked experimental).
 //! - opencode: a global plugin that runs sync on session start (experimental).
 //! - Antigravity CLI (`agy`): native lifecycle hook in ~/.gemini/config/hooks.json.
-//! - Kiro: no startup hook exists — we generate a shell-init wrapper.
+//! - Copilot: dedicated user-level hooks file ~/.copilot/hooks/cli-switch.json.
+//! - Kiro: native `agentSpawn` hook, but it lives on a single agent (no global
+//!   hooks; the built-in `kiro_default` agent has no writable file). We inject
+//!   it into the configured default agent (~/.kiro/agents/<name>.json) and fall
+//!   back to a shell-init wrapper when no default agent is set.
 
 use crate::model::Cli;
 use crate::paths;
@@ -34,12 +38,8 @@ pub fn mount(clis: &[Cli]) -> R<MountReport> {
             Cli::Opencode => lines.push(install_opencode_plugin(&exe)?),
             Cli::Antigravity => lines.push(install_antigravity_hook(&exe)?),
             Cli::Copilot => lines.push(install_copilot_hook(&exe)?),
-            Cli::Kiro => {} // covered by shell-init below
+            Cli::Kiro => lines.push(install_kiro_hook(&exe)?),
         }
-    }
-
-    if clis.contains(&Cli::Kiro) {
-        lines.push(write_shell_init(&exe)?);
     }
 
     Ok(MountReport { lines })
@@ -69,10 +69,7 @@ pub fn unmount(clis: &[Cli]) -> R<MountReport> {
                 &paths::copilot_hook(),
                 "copilot hook",
             )?),
-            Cli::Kiro => lines.push(remove_generated_file(
-                &paths::shell_init(),
-                "kiro shell init",
-            )?),
+            Cli::Kiro => lines.push(remove_kiro_hook()?),
         }
     }
 
@@ -371,6 +368,121 @@ fn value_mentions(value: &Value, needle: &str) -> bool {
 
 fn shell_double_quote(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', r"\\").replace('"', "\\\""))
+}
+
+// ───────────────────────── Kiro ─────────────────────────
+// Native `agentSpawn` hook, but per-agent only. Inject into the configured
+// default agent; fall back to a shell wrapper when there isn't one.
+
+/// The global Kiro agent file that `chat.defaultAgent` points at, if any.
+/// Returns None when no default agent is configured (the built-in
+/// `kiro_default` has no writable file we can hook).
+pub fn kiro_default_agent_path() -> Option<std::path::PathBuf> {
+    let text = util::read_to_string_opt(&paths::kiro_settings()).ok()??;
+    let root: Value = serde_json::from_str(&text).ok()?;
+    // CLI settings use flat dotted keys ("chat.defaultAgent"); accept nested too.
+    let name = root
+        .get("chat.defaultAgent")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            root.get("chat")
+                .and_then(|c| c.get("defaultAgent"))
+                .and_then(|v| v.as_str())
+        })?;
+    if name.is_empty() || name == "kiro_default" {
+        return None;
+    }
+    Some(paths::kiro_agent_config(name))
+}
+
+fn install_kiro_hook(exe: &str) -> R<String> {
+    match kiro_default_agent_path() {
+        Some(path) if path.exists() => inject_kiro_agent_hook(&path, exe),
+        _ => write_shell_init(exe),
+    }
+}
+
+fn inject_kiro_agent_hook(path: &std::path::Path, exe: &str) -> R<String> {
+    let text = util::read_to_string_opt(path)?.unwrap_or_default();
+    let mut root: Value = if text.trim().is_empty() {
+        Value::Object(Map::new())
+    } else {
+        serde_json::from_str(&text).map_err(|e| util::ctx(path, e))?
+    };
+    let obj = root
+        .as_object_mut()
+        .ok_or_else(|| format!("{} is not a JSON object", path.display()))?;
+
+    let hooks_item = obj
+        .entry("hooks")
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !hooks_item.is_object() {
+        *hooks_item = Value::Object(Map::new());
+    }
+    let hooks = hooks_item.as_object_mut().unwrap();
+
+    // Drop any prior cli-switch entry, then add a fresh one. `--quiet` keeps
+    // stdout empty so it isn't injected into the agent's context.
+    let mut entries: Vec<Value> = hooks
+        .get("agentSpawn")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    entries.retain(|e| !kiro_hook_mentions(e, "cli-switch") && !kiro_hook_mentions(e, "agent-sync"));
+    entries.push(json!({ "command": format!("{exe} sync --quiet") }));
+    hooks.insert("agentSpawn".into(), Value::Array(entries));
+
+    let out = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    util::write_atomic(path, &out)?;
+    Ok(format!("kiro: agentSpawn hook injected -> {}", path.display()))
+}
+
+fn kiro_hook_mentions(entry: &Value, needle: &str) -> bool {
+    entry
+        .get("command")
+        .and_then(|c| c.as_str())
+        .map(|c| c.contains(needle))
+        .unwrap_or(false)
+}
+
+fn remove_kiro_hook() -> R<String> {
+    let mut parts = Vec::new();
+
+    // Pull our entry out of the default agent's agentSpawn, if present.
+    if let Some(path) = kiro_default_agent_path() {
+        if let Some(text) = util::read_to_string_opt(&path)? {
+            if !text.trim().is_empty() {
+                if let Ok(mut root) = serde_json::from_str::<Value>(&text) {
+                    if let Some(entries) = root
+                        .get_mut("hooks")
+                        .and_then(|h| h.get_mut("agentSpawn"))
+                        .and_then(|v| v.as_array_mut())
+                    {
+                        let before = entries.len();
+                        entries.retain(|e| {
+                            !kiro_hook_mentions(e, "cli-switch")
+                                && !kiro_hook_mentions(e, "agent-sync")
+                        });
+                        if entries.len() != before {
+                            let out =
+                                serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+                            util::write_atomic(&path, &out)?;
+                            parts.push(format!("agentSpawn hook removed from {}", path.display()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Also drop the shell wrapper (used when there's no default agent).
+    let wrapper = remove_generated_file(&paths::shell_init(), "kiro shell init")?;
+    if parts.is_empty() {
+        Ok(wrapper)
+    } else {
+        parts.push(wrapper);
+        Ok(format!("kiro: {}", parts.join("; ")))
+    }
 }
 
 // ───────────────────────── shell-init for CLIs without hooks ─────────────────────────

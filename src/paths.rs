@@ -140,6 +140,20 @@ pub fn antigravity_hooks() -> PathBuf {
     home().join(".gemini").join("config").join("hooks.json")
 }
 
+/// Kiro CLI settings file — holds `chat.defaultAgent`.
+pub fn kiro_settings() -> PathBuf {
+    home().join(".kiro").join("settings").join("cli.json")
+}
+
+/// A named global Kiro agent config file (`~/.kiro/agents/<name>.json`),
+/// where the CLI looks up that agent's `hooks`.
+pub fn kiro_agent_config(name: &str) -> PathBuf {
+    home()
+        .join(".kiro")
+        .join("agents")
+        .join(format!("{name}.json"))
+}
+
 /// Copilot CLI user-level hooks file we drop to trigger sync at startup.
 pub fn copilot_hook() -> PathBuf {
     home()
