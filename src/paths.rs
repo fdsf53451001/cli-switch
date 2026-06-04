@@ -79,6 +79,7 @@ pub fn mcp_config(cli: Cli) -> PathBuf {
             .join(".gemini")
             .join("antigravity-cli")
             .join("mcp_config.json"),
+        Cli::Copilot => h.join(".copilot").join("mcp-config.json"),
     }
 }
 
@@ -91,6 +92,7 @@ pub fn skills_dir(cli: Cli) -> PathBuf {
         Cli::Opencode => h.join(".config").join("opencode").join("skills"),
         Cli::Kiro => h.join(".kiro").join("skills"),
         Cli::Antigravity => h.join(".gemini").join("antigravity-cli").join("skills"),
+        Cli::Copilot => h.join(".copilot").join("skills"),
     }
 }
 
@@ -112,6 +114,7 @@ pub fn instructions_file(cli: Cli) -> PathBuf {
         Cli::Opencode => h.join(".config").join("opencode").join("AGENTS.md"),
         Cli::Kiro => h.join(".kiro").join("steering").join("AGENTS.md"),
         Cli::Antigravity => h.join(".gemini").join("GEMINI.md"),
+        Cli::Copilot => h.join(".copilot").join("copilot-instructions.md"),
     }
 }
 
@@ -135,4 +138,12 @@ pub fn opencode_plugin() -> PathBuf {
 }
 pub fn antigravity_hooks() -> PathBuf {
     home().join(".gemini").join("config").join("hooks.json")
+}
+
+/// Copilot CLI user-level hooks file we drop to trigger sync at startup.
+pub fn copilot_hook() -> PathBuf {
+    home()
+        .join(".copilot")
+        .join("hooks")
+        .join("cli-switch.json")
 }

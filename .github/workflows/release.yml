@@ -1,0 +1,52 @@
+name: release
+
+# Push a version tag to build cross-platform binaries and publish a release:
+#   git tag v0.1.0 && git push origin v0.1.0
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: # allow manual runs from the Actions tab
+
+permissions:
+  contents: write # needed to create the GitHub Release and upload assets
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, os: macos-latest } # Apple Silicon
+          - { target: x86_64-apple-darwin, os: macos-13 } # Intel Mac
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest } # static Linux
+          - { target: x86_64-pc-windows-msvc, os: windows-latest } # Windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: endsWith(matrix.target, 'linux-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Stage asset
+        shell: bash
+        run: |
+          ext=""
+          [[ "${{ matrix.target }}" == *windows* ]] && ext=".exe"
+          src="target/${{ matrix.target }}/release/cli-switch${ext}"
+          dst="cli-switch-${{ matrix.target }}${ext}"
+          cp "$src" "$dst"
+          echo "ASSET=$dst" >> "$GITHUB_ENV"
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET }}
+          generate_release_notes: true

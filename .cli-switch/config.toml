@@ -1,7 +1,9 @@
-# cli-switch project configuration.
+# cli-switch configuration.
+# scope is kept for readability; global and project config live in different files.
 scope = "project"
 
-clis = ["claude", "codex", "opencode", "kiro", "antigravity"]
+# Which CLIs to sync (remove any you don't want touched):
+clis = ["claude", "codex", "opencode", "kiro", "antigravity", "copilot"]
 
 [features]
 mcp = false

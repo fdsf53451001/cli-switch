@@ -2,7 +2,7 @@
 
 把 **MCP servers、skills、instructions** 在多個 AI CLI 之間自動同步，並可掛載到各 CLI 啟動時自動執行。
 
-支援：**Claude Code · Codex · opencode · Kiro · Antigravity CLI (`agy`)**
+支援：**Claude Code · Codex · opencode · Kiro · Antigravity CLI (`agy`) · GitHub Copilot CLI (`copilot`)**
 
 單一 Rust 編譯 binary，**執行期零依賴**，原生跨 macOS / Linux / Windows。
 
@@ -12,18 +12,33 @@
 
 你在五個 CLI 裡各自維護 MCP server、skill、指令檔，格式還互不相容：
 
-| 項目 | Claude | Codex | opencode | Kiro | Antigravity CLI (`agy`) |
-|------|--------|-------|----------|------|-------------|
-| MCP 檔 | `~/.claude.json` | `~/.codex/config.toml` | `~/.config/opencode/opencode.json` | `~/.kiro/settings/mcp.json` | `~/.gemini/antigravity-cli/mcp_config.json` |
-| MCP 格式 | JSON `mcpServers` | TOML `[mcp_servers.x]` | JSON `mcp`（command 為陣列、`environment`） | JSON `mcpServers` | JSON `mcpServers`（`serverUrl`、禁多餘鍵） |
-| Skills | `~/.claude/skills/` | `~/.codex/skills/` | `~/.config/opencode/skills/` | `~/.kiro/skills/` | `~/.gemini/antigravity-cli/skills/` |
-| 指令檔 | `CLAUDE.md` | `AGENTS.md` | `AGENTS.md` | `steering/AGENTS.md` | `GEMINI.md` |
+| 項目 | Claude | Codex | opencode | Kiro | Antigravity CLI (`agy`) | Copilot CLI |
+|------|--------|-------|----------|------|-------------|-------------|
+| MCP 檔 | `~/.claude.json` | `~/.codex/config.toml` | `~/.config/opencode/opencode.json` | `~/.kiro/settings/mcp.json` | `~/.gemini/antigravity-cli/mcp_config.json` | `~/.copilot/mcp-config.json` |
+| MCP 格式 | JSON `mcpServers` | TOML `[mcp_servers.x]` | JSON `mcp`（command 為陣列、`environment`） | JSON `mcpServers` | JSON `mcpServers`（`serverUrl`、禁多餘鍵） | JSON `mcpServers`（type `local`/`http`） |
+| Skills | `~/.claude/skills/` | `~/.codex/skills/` | `~/.config/opencode/skills/` | `~/.kiro/skills/` | `~/.gemini/antigravity-cli/skills/` | `~/.copilot/skills/` |
+| 指令檔 | `CLAUDE.md` | `AGENTS.md` | `AGENTS.md` | `steering/AGENTS.md` | `GEMINI.md` | `copilot-instructions.md` |
 
 `cli-switch` 用一個**中立的單一真理來源**（`~/.config/cli-switch/`）把這些拉平：MCP 用轉換器產生各家原生格式，skills/instructions 用 symlink。**雙向**——你在任一 CLI 改了，下次同步會合併回來再散播給其他家。
 
 ---
 
 ## 安裝
+
+### 一鍵安裝（預編 binary，免裝 Rust）
+
+`install.sh` 會依你的平台從 GitHub Releases 下載對應的預編 binary，裝到 `~/.local/bin` 並建立真理來源：
+
+```bash
+git clone https://github.com/fdsf53451001/cli-switch && cd cli-switch
+./install.sh
+```
+
+下載不到對應平台的 binary 時會自動 fallback 成原始碼編譯（需要 Rust）。可用環境變數覆寫：`CLI_SWITCH_VERSION=v0.1.0`、`CLI_SWITCH_BIN_DIR=...`、`CLI_SWITCH_FROM_SOURCE=1`。
+
+預編 binary 涵蓋：macOS（Apple Silicon / Intel）、Linux x86_64（musl 靜態）、Windows x86_64。其他平台請用下方原始碼編譯。
+
+### 從原始碼編譯
 
 需要 Rust（僅編譯期；產物是零依賴 binary）。
 
@@ -40,6 +55,14 @@ install -m755 target/release/cli-switch ~/.local/bin/cli-switch
 rustup target add x86_64-unknown-linux-gnu x86_64-pc-windows-gnu
 cargo build --release --target x86_64-unknown-linux-gnu
 cargo build --release --target x86_64-pc-windows-gnu     # 產出 cli-switch.exe
+```
+
+### 發布新版本（維護者）
+
+推一個版本 tag 即可觸發 `.github/workflows/release.yml`，自動 build 四平台 binary 並發佈到 GitHub Releases：
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
 ```
 
 ---
@@ -139,6 +162,7 @@ AGENTS.md          # 專案指令檔 SSOT；不存在時會自動建立
 | opencode | 直接讀 `AGENTS.md` | 直接使用 `.agents/skills` |
 | Kiro | `.kiro/steering/AGENTS.md -> AGENTS.md` | `.kiro/skills -> .agents/skills` |
 | Antigravity | 建立 `.agents/rules/agents-root.md`，內容 `@/AGENTS.md` | 直接使用 `.agents/skills` |
+| Copilot CLI | 直接讀 `AGENTS.md` | 直接使用 `.agents/skills` |
 
 如果目標位置已經有真實檔案或目錄，`cli-switch` 只會報衝突，不會覆蓋；先手動 merge 到 `AGENTS.md` 或 `.agents/skills/` 後再重跑。
 
@@ -167,6 +191,7 @@ AGENTS.md          # 專案指令檔 SSOT；不存在時會自動建立
 | opencode | `~/.config/opencode/plugin/cli-switch.js` | ⚠️ 實驗性，plugin 事件名稱可能改版 |
 | Kiro | 無原生 startup hook → 產生 shell wrapper（`~/.config/cli-switch/shell-init.sh`） | ⚠️ 需手動 source 到 shell rc |
 | Antigravity CLI (`agy`) | `~/.gemini/config/hooks.json` 的 `PreInvocation` hook | ✅ 原生 hook；每次模型呼叫前同步 |
+| GitHub Copilot CLI (`copilot`) | `~/.copilot/hooks/cli-switch.json` 的 `sessionStart` hook | ✅ 原生 hook；每次 session 啟動時同步 |
 
 `mount` 會自動偵測既有設定並**就地合併**（不會覆蓋你 Claude 既有的其他 hook），且重複執行不會疊加。
 

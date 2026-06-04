@@ -123,6 +123,9 @@ fn sync_instructions(
                 out,
             )?,
             Cli::Antigravity => write_antigravity_rule(root, dry_run, out)?,
+            Cli::Copilot => out
+                .notes
+                .push("copilot: project AGENTS.md is read directly".to_string()),
         }
     }
     Ok(())
@@ -148,6 +151,9 @@ fn sync_skills(
             Cli::Antigravity => out
                 .notes
                 .push("antigravity: project .agents/skills is used directly".to_string()),
+            Cli::Copilot => out
+                .notes
+                .push("copilot: project .agents/skills is used directly".to_string()),
         }
     }
     Ok(())

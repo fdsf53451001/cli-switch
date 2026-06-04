@@ -21,6 +21,9 @@ pub fn installed(cli: Cli) -> bool {
         Cli::Antigravity => {
             return command_exists("agy") || h.join(".gemini").join("antigravity-cli").exists();
         }
+        Cli::Copilot => {
+            return command_exists("copilot") || h.join(".copilot").exists();
+        }
     };
     probe.exists()
 }
@@ -58,6 +61,7 @@ pub fn read_mcp(cli: Cli) -> R<McpMap> {
         Cli::Opencode => json_read(&text, "mcp", opencode_parse),
         Cli::Kiro => json_read(&text, "mcpServers", kiro_parse),
         Cli::Antigravity => json_read(&text, "mcpServers", antigravity_parse),
+        Cli::Copilot => json_read(&text, "mcpServers", copilot_parse),
     }
     .map_err(|e| util::ctx(&path, e))
 }
@@ -98,6 +102,14 @@ pub fn write_mcp(cli: Cli, servers: &McpMap, remove: &BTreeSet<String>) -> R<()>
             servers,
             remove,
             antigravity_emit,
+            true,
+        )?,
+        Cli::Copilot => json_write(
+            existing.as_deref(),
+            "mcpServers",
+            servers,
+            remove,
+            copilot_emit,
             true,
         )?,
     };
@@ -390,6 +402,55 @@ fn antigravity_emit(s: &McpServer) -> Value {
     }
     if !s.enabled {
         o.insert("disabled".into(), Value::Bool(true));
+    }
+    Value::Object(o)
+}
+
+// ───────────────────────── Copilot ─────────────────────────
+// Dedicated MCP file (~/.copilot/mcp-config.json), Claude-shaped `mcpServers`.
+// local: {"type":"local","command","args","env"}  http:{"type":"http","url","headers"}
+// (Copilot also accepts a `tools` filter per server; we leave it unset = all tools.)
+
+fn copilot_parse(e: &Value) -> Option<McpServer> {
+    let ty = e.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let is_http = e.get("url").is_some() || matches!(ty, "http" | "sse" | "streamable-http" | "ws");
+    if is_http {
+        let url = e.get("url")?.as_str()?.to_string();
+        let mut s = McpServer::http(url);
+        s.headers = value_to_str_map(e.get("headers"));
+        Some(s)
+    } else {
+        let cmd = e.get("command")?.as_str()?.to_string();
+        let mut s = McpServer::stdio(cmd, value_to_str_vec(e.get("args")));
+        s.env = value_to_str_map(e.get("env"));
+        Some(s)
+    }
+}
+
+fn copilot_emit(s: &McpServer) -> Value {
+    let mut o = Map::new();
+    match s.transport {
+        Transport::Stdio => {
+            o.insert("type".into(), Value::String("local".into()));
+            if let Some(c) = &s.command {
+                o.insert("command".into(), Value::String(c.clone()));
+            }
+            if !s.args.is_empty() {
+                o.insert("args".into(), str_vec_to_value(&s.args));
+            }
+            if !s.env.is_empty() {
+                o.insert("env".into(), str_map_to_value(&s.env));
+            }
+        }
+        Transport::Http => {
+            o.insert("type".into(), Value::String("http".into()));
+            if let Some(u) = &s.url {
+                o.insert("url".into(), Value::String(u.clone()));
+            }
+            if !s.headers.is_empty() {
+                o.insert("headers".into(), str_map_to_value(&s.headers));
+            }
+        }
     }
     Value::Object(o)
 }

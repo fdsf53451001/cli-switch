@@ -294,7 +294,7 @@ fn project_instruction_ok(
 ) -> bool {
     match cli {
         Cli::Claude => link_ok(&root.join("CLAUDE.md"), agents),
-        Cli::Codex | Cli::Opencode => agents.exists(),
+        Cli::Codex | Cli::Opencode | Cli::Copilot => agents.exists(),
         Cli::Kiro => link_ok(
             &root.join(".kiro").join("steering").join("AGENTS.md"),
             agents,
@@ -307,7 +307,7 @@ fn project_skills_ok(cli: Cli, root: &std::path::Path, skills: &std::path::Path)
     match cli {
         Cli::Claude => link_ok(&root.join(".claude").join("skills"), skills),
         Cli::Kiro => link_ok(&root.join(".kiro").join("skills"), skills),
-        Cli::Codex | Cli::Opencode | Cli::Antigravity => skills.exists(),
+        Cli::Codex | Cli::Opencode | Cli::Antigravity | Cli::Copilot => skills.exists(),
     }
 }
 
@@ -347,6 +347,7 @@ fn startup_state(cli: Cli) -> &'static str {
         Cli::Claude => paths::claude_settings(),
         Cli::Codex => paths::codex_hooks(),
         Cli::Opencode => paths::opencode_plugin(),
+        Cli::Copilot => paths::copilot_hook(),
         Cli::Kiro | Cli::Antigravity => unreachable!(),
     };
     match std::fs::read_to_string(path) {
@@ -426,7 +427,7 @@ COMMANDS:
     mount [clis…]   Install startup hooks so each CLI syncs on launch
     help            This message
 
-CLIs: claude, codex, opencode, kiro, antigravity
+CLIs: claude, codex, opencode, kiro, antigravity, copilot
 
 Global sync store at ~/.config/cli-switch:
     mcp.json        canonical MCP servers (neutral format)

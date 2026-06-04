@@ -33,6 +33,7 @@ pub fn mount(clis: &[Cli]) -> R<MountReport> {
             Cli::Codex => lines.push(install_codex_hook(&exe)?),
             Cli::Opencode => lines.push(install_opencode_plugin(&exe)?),
             Cli::Antigravity => lines.push(install_antigravity_hook(&exe)?),
+            Cli::Copilot => lines.push(install_copilot_hook(&exe)?),
             Cli::Kiro => {} // covered by shell-init below
         }
     }
@@ -64,6 +65,10 @@ pub fn unmount(clis: &[Cli]) -> R<MountReport> {
                 "opencode plugin",
             )?),
             Cli::Antigravity => lines.push(remove_antigravity_hook()?),
+            Cli::Copilot => lines.push(remove_generated_file(
+                &paths::copilot_hook(),
+                "copilot hook",
+            )?),
             Cli::Kiro => lines.push(remove_generated_file(
                 &paths::shell_init(),
                 "kiro shell init",
@@ -323,6 +328,32 @@ fn install_antigravity_hook(exe: &str) -> R<String> {
     util::write_atomic(&path, &out)?;
     Ok(format!(
         "antigravity: PreInvocation hook written -> {}",
+        path.display()
+    ))
+}
+
+// ───────────────────────── Copilot ─────────────────────────
+// Dedicated user-level hooks file at ~/.copilot/hooks/cli-switch.json.
+
+fn install_copilot_hook(exe: &str) -> R<String> {
+    let path = paths::copilot_hook();
+    let bash = format!("{} sync --quiet", shell_double_quote(exe));
+    let pwsh = format!("& {} sync --quiet", shell_double_quote(exe));
+    let root = json!({
+        "version": 1,
+        "hooks": {
+            "sessionStart": [{
+                "type": "command",
+                "bash": bash,
+                "powershell": pwsh,
+                "timeoutSec": 30
+            }]
+        }
+    });
+    let out = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    util::write_atomic(&path, &out)?;
+    Ok(format!(
+        "copilot: sessionStart hook written -> {}",
         path.display()
     ))
 }

@@ -86,15 +86,17 @@ pub enum Cli {
     Opencode,
     Kiro,
     Antigravity,
+    Copilot,
 }
 
 impl Cli {
-    pub const ALL: [Cli; 5] = [
+    pub const ALL: [Cli; 6] = [
         Cli::Claude,
         Cli::Codex,
         Cli::Opencode,
         Cli::Kiro,
         Cli::Antigravity,
+        Cli::Copilot,
     ];
 
     pub fn id(self) -> &'static str {
@@ -104,6 +106,7 @@ impl Cli {
             Cli::Opencode => "opencode",
             Cli::Kiro => "kiro",
             Cli::Antigravity => "antigravity",
+            Cli::Copilot => "copilot",
         }
     }
 
