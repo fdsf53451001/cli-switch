@@ -32,8 +32,11 @@ fn main() {
 }
 
 fn dispatch(args: &[String]) -> R<()> {
-    let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
-    let rest = &args[args.len().min(1)..];
+    let (cmd, rest) = match args.first().map(|s| s.as_str()) {
+        None => ("configure", &args[0..]),
+        Some(first) if first.starts_with('-') => ("configure", args),
+        Some(first) => (first, &args[1..]),
+    };
     match cmd {
         "sync" => cmd_sync(rest),
         "status" => cmd_status(),
@@ -94,7 +97,15 @@ fn cmd_mount(args: &[String]) -> R<()> {
         .collect();
     let clis = if named.is_empty() {
         let cfg = config::load()?;
-        config::active_clis(&cfg)
+        let mut clis = config::active_clis(&cfg);
+        if let Some(project_cfg) = config::load_project()? {
+            for cli in config::active_clis(&project_cfg) {
+                if !clis.contains(&cli) {
+                    clis.push(cli);
+                }
+            }
+        }
+        clis
     } else {
         named
     };
@@ -116,10 +127,12 @@ fn cmd_status() -> R<()> {
 
 pub(crate) fn print_status() -> R<()> {
     let cfg = config::load()?;
+    let project_cfg = config::load_project()?;
 
     println!("cli-switch {VERSION}");
     println!("store: {}", paths::store_root().display());
-    println!("scope: {}", cfg.scope.id());
+    println!();
+    println!("Global sync");
     println!(
         "selected CLIs: {}",
         cfg.clis
@@ -128,10 +141,18 @@ pub(crate) fn print_status() -> R<()> {
             .collect::<Vec<_>>()
             .join(", ")
     );
+    status_global(&cfg)?;
 
-    match cfg.scope {
-        config::Scope::Global => status_global(&cfg),
-        config::Scope::Project => status_project(&cfg),
+    println!();
+    println!("Project sync");
+    match project_cfg {
+        Some(project_cfg) => status_project(&project_cfg),
+        None => {
+            println!("project: {}", paths::project_root().display());
+            println!("state: not joined");
+            println!("Run `cli-switch` and enable project sync for this directory to join.");
+            Ok(())
+        }
     }
 }
 
@@ -247,12 +268,12 @@ fn status_project(cfg: &config::Config) -> R<()> {
 
     for cli in Cli::ALL {
         let configured = cfg.clis.contains(&cli);
-        let instructions = if configured {
+        let instructions = if configured && cfg.instructions {
             project_instruction_state(cli, &root, &agents, &antigravity_rule)
         } else {
             "off"
         };
-        let skills_state = if configured {
+        let skills_state = if configured && cfg.skills {
             project_skills_state(cli, &root, &skills)
         } else {
             "off"
@@ -270,7 +291,7 @@ fn status_project(cfg: &config::Config) -> R<()> {
 
     if !agents.exists() {
         println!();
-        println!("Project sync is not ready: create AGENTS.md, then run `cli-switch sync`.");
+        println!("Project sync is not ready: run `cli-switch sync` to create AGENTS.md.");
     }
     Ok(())
 }
@@ -418,10 +439,10 @@ fn print_help() {
         r#"cli-switch {VERSION} — sync MCP servers, skills & instructions across AI CLIs
 
 USAGE:
-    cli-switch <command> [options]
+    cli-switch [command] [options]
 
 COMMANDS:
-    configure       Interactive setup: select CLIs, scope, and startup sync
+    configure       Interactive setup; default when no command is given
     init            Create the canonical store (~/.config/cli-switch) and config
     sync            Run a full sync (MCP merge + skills/instructions links)
         --prune       remove servers gone from every CLI (default: keep + warn)

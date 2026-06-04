@@ -1,6 +1,6 @@
 //! Orchestration: run one full sync pass (MCP merge + skills/instructions links).
 
-use crate::config::{self, Config, Scope};
+use crate::config::{self, Config};
 use crate::merge::{self, CliState};
 use crate::model::{Canonical, Cli};
 use crate::util::{mtime_secs, R};
@@ -38,46 +38,46 @@ pub fn run(opts: &Options) -> R<()> {
     let cfg = config::load()?;
     let mut log = Logger { quiet: opts.quiet };
 
-    if cfg.scope == Scope::Project {
-        return sync_project(&cfg, opts, &mut log);
-    }
-
     let active = config::active_clis(&cfg);
 
     if active.is_empty() {
         log.info("No configured CLI is installed — nothing to sync.");
-        return Ok(());
-    }
-    log.info(&format!(
-        "Syncing {} CLI(s): {}",
-        active.len(),
-        active.iter().map(|c| c.id()).collect::<Vec<_>>().join(", ")
-    ));
+    } else {
+        log.info(&format!(
+            "Syncing global config for {} CLI(s): {}",
+            active.len(),
+            active.iter().map(|c| c.id()).collect::<Vec<_>>().join(", ")
+        ));
 
-    if cfg.mcp {
-        sync_mcp(&cfg, &active, opts, &mut log)?;
-    }
-    if cfg.instructions {
-        if opts.dry_run {
-            log.info(&format!(
-                "  instructions: dry-run — would sync links for {} CLI(s)",
-                active.len()
-            ));
-        } else {
-            let out = links::sync_instructions(&active)?;
-            report_links("instructions", &out, &mut log);
+        if cfg.mcp {
+            sync_mcp(&cfg, &active, opts, &mut log)?;
+        }
+        if cfg.instructions {
+            if opts.dry_run {
+                log.info(&format!(
+                    "  instructions: dry-run — would sync links for {} CLI(s)",
+                    active.len()
+                ));
+            } else {
+                let out = links::sync_instructions(&active)?;
+                report_links("instructions", &out, &mut log);
+            }
+        }
+        if cfg.skills {
+            if opts.dry_run {
+                log.info(&format!(
+                    "  skills: dry-run — would sync links for {} CLI(s)",
+                    active.len()
+                ));
+            } else {
+                let out = links::sync_skills(&active)?;
+                report_links("skills", &out, &mut log);
+            }
         }
     }
-    if cfg.skills {
-        if opts.dry_run {
-            log.info(&format!(
-                "  skills: dry-run — would sync links for {} CLI(s)",
-                active.len()
-            ));
-        } else {
-            let out = links::sync_skills(&active)?;
-            report_links("skills", &out, &mut log);
-        }
+
+    if let Some(project_cfg) = config::load_project()? {
+        sync_project(&project_cfg, opts, &mut log)?;
     }
 
     log.info("Done.");
@@ -117,7 +117,6 @@ fn sync_project(cfg: &Config, opts: &Options, log: &mut Logger) -> R<()> {
     for conflict in out.conflicts {
         log.warn(&format!("  project: {conflict}"));
     }
-    log.info("Done.");
     Ok(())
 }
 

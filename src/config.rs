@@ -50,20 +50,40 @@ impl Default for Config {
 }
 
 pub fn load() -> R<Config> {
-    let Some(text) = util::read_to_string_opt(&paths::store_config())? else {
-        return Ok(Config::default());
+    load_from(&paths::store_config(), Scope::Global)
+}
+
+pub fn load_project() -> R<Option<Config>> {
+    let path = paths::project_config();
+    if util::read_to_string_opt(&path)?.is_none() {
+        return Ok(None);
+    }
+    load_from(&path, Scope::Project).map(Some)
+}
+
+pub fn project_joined() -> bool {
+    paths::project_config().exists()
+}
+
+fn load_from(path: &std::path::Path, default_scope: Scope) -> R<Config> {
+    let Some(text) = util::read_to_string_opt(path)? else {
+        return Ok(default_for_scope(default_scope));
     };
     let doc: toml_edit::DocumentMut = text
         .parse()
-        .map_err(|e: toml_edit::TomlError| util::ctx(&paths::store_config(), e))?;
+        .map_err(|e: toml_edit::TomlError| util::ctx(path, e))?;
 
-    let mut cfg = Config::default();
+    let mut cfg = default_for_scope(default_scope);
     if let Some(scope) = doc
         .get("scope")
         .and_then(|i| i.as_str())
         .and_then(Scope::from_id)
     {
-        cfg.scope = scope;
+        // Backward-compatible read for old config files. The caller's path
+        // decides whether this is global or project config.
+        if path == paths::store_config() && scope == Scope::Global {
+            cfg.scope = Scope::Global;
+        }
     }
     if let Some(arr) = doc.get("clis").and_then(|i| i.as_array()) {
         cfg.clis = arr
@@ -74,14 +94,39 @@ pub fn load() -> R<Config> {
     }
     if let Some(f) = doc.get("features").and_then(|i| i.as_table_like()) {
         let b = |k: &str, d: bool| f.get(k).and_then(|i| i.as_bool()).unwrap_or(d);
-        cfg.mcp = b("mcp", true);
-        cfg.skills = b("skills", true);
-        cfg.instructions = b("instructions", true);
+        cfg.mcp = b("mcp", cfg.mcp);
+        cfg.skills = b("skills", cfg.skills);
+        cfg.instructions = b("instructions", cfg.instructions);
     }
     Ok(cfg)
 }
 
+fn default_for_scope(scope: Scope) -> Config {
+    Config {
+        scope,
+        mcp: scope == Scope::Global,
+        ..Config::default()
+    }
+}
+
 pub fn save(cfg: &Config) -> R<()> {
+    save_to(&paths::store_config(), cfg)
+}
+
+pub fn save_project(cfg: &Config) -> R<()> {
+    save_to(&paths::project_config(), cfg)
+}
+
+pub fn remove_project() -> R<()> {
+    let path = paths::project_config();
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(util::ctx(&path, e)),
+    }
+}
+
+fn save_to(path: &std::path::Path, cfg: &Config) -> R<()> {
     let clis = cfg
         .clis
         .iter()
@@ -90,8 +135,7 @@ pub fn save(cfg: &Config) -> R<()> {
         .join(", ");
     let body = format!(
         r#"# cli-switch configuration.
-# scope = "global" syncs ~/.config/cli-switch to global CLI config.
-# scope = "project" syncs the current directory's AGENTS.md/.agents to project-local CLI files.
+# scope is kept for readability; global and project config live in different files.
 scope = "{}"
 
 # Which CLIs to sync (remove any you don't want touched):
@@ -108,7 +152,7 @@ instructions = {}
         cfg.skills,
         cfg.instructions
     );
-    util::write_atomic(&paths::store_config(), &body)
+    util::write_atomic(path, &body)
 }
 
 /// Write a default config.toml documenting the options.

@@ -3,18 +3,41 @@
 use crate::adapters;
 use crate::config::{self, Config, Scope};
 use crate::model::Cli;
-use crate::{mount, paths, store, sync, util};
+use crate::{mount, paths, project, store, sync, util};
 use std::io::{self, Write};
 
 pub fn run(args: &[String]) -> util::R<()> {
+    let scope_arg = arg_value(args, "--scope").and_then(|s| Scope::from_id(&s));
+    if scope_arg == Some(Scope::Project) {
+        configure_project(args, true)?;
+        return finish();
+    }
+    if scope_arg == Some(Scope::Global) || has_flag(args, "--yes") || has_flag(args, "-y") {
+        configure_global(args, true)?;
+        return finish();
+    }
+
+    if prompt_yes_no("Configure global sync", true)? {
+        configure_global(args, false)?;
+    }
+
+    let joined = config::project_joined();
+    if prompt_yes_no("Enable project sync for this directory", joined)? {
+        configure_project(args, false)?;
+    } else if joined {
+        leave_project()?;
+    }
+
+    finish()
+}
+
+fn configure_global(args: &[String], no_prompt: bool) -> util::R<Vec<Cli>> {
     let has_config = paths::store_config().exists();
     let existing = config::load().unwrap_or_default();
-    let scope_arg = arg_value(args, "--scope").and_then(|s| Scope::from_id(&s));
     let clis_arg = match arg_value(args, "--clis") {
         Some(raw) => Some(parse_cli_selection(&raw, &[])?),
         None => None,
     };
-    let yes = has_flag(args, "--yes") || has_flag(args, "-y");
     let no_mount = has_flag(args, "--no-mount");
 
     let default_clis = if has_config {
@@ -23,35 +46,24 @@ pub fn run(args: &[String]) -> util::R<()> {
         installed_clis()
     };
 
-    let clis = match (clis_arg, yes) {
+    let clis = match (clis_arg, no_prompt) {
         (Some(clis), _) => clis,
         (None, true) => default_clis,
         (None, false) => prompt_clis(&default_clis)?,
     };
 
-    let scope = match (scope_arg, yes) {
-        (Some(scope), _) => scope,
-        (None, true) => existing.scope,
-        (None, false) => prompt_scope(existing.scope)?,
-    };
-
-    if scope == Scope::Global {
-        store::ensure_scaffold()?;
-    } else {
-        util::ensure_dir(&paths::store_root())?;
-    }
+    store::ensure_scaffold()?;
 
     let cfg = Config {
-        scope,
+        scope: Scope::Global,
         clis: clis.clone(),
-        mcp: scope == Scope::Global,
+        mcp: true,
         skills: true,
         instructions: true,
     };
     config::save(&cfg)?;
 
-    println!("Configured cli-switch:");
-    println!("  scope: {}", scope.id());
+    println!("Configured global cli-switch sync:");
     println!(
         "  clis:  {}",
         clis.iter().map(|c| c.id()).collect::<Vec<_>>().join(", ")
@@ -75,8 +87,78 @@ pub fn run(args: &[String]) -> util::R<()> {
         }
     }
 
+    Ok(clis)
+}
+
+fn configure_project(args: &[String], no_prompt: bool) -> util::R<Vec<Cli>> {
+    let existing = config::load_project()?.unwrap_or_else(|| Config {
+        scope: Scope::Project,
+        clis: installed_clis(),
+        mcp: false,
+        skills: true,
+        instructions: true,
+    });
+    let clis_arg = match arg_value(args, "--clis") {
+        Some(raw) => Some(parse_cli_selection(&raw, &[])?),
+        None => None,
+    };
+    let no_mount = has_flag(args, "--no-mount");
+
+    let clis = match (clis_arg, no_prompt) {
+        (Some(clis), _) => clis,
+        (None, true) => existing.clis,
+        (None, false) => prompt_clis(&existing.clis)?,
+    };
+
+    util::ensure_dir(&paths::project_config_dir())?;
+    let cfg = Config {
+        scope: Scope::Project,
+        clis: clis.clone(),
+        mcp: false,
+        skills: true,
+        instructions: true,
+    };
+    config::save_project(&cfg)?;
+
+    println!("Joined project sync:");
+    println!("  project: {}", paths::project_root().display());
+    println!(
+        "  clis:    {}",
+        clis.iter().map(|c| c.id()).collect::<Vec<_>>().join(", ")
+    );
+    println!("  config:  {}", paths::project_config().display());
+
+    if !no_mount {
+        let installed = clis
+            .iter()
+            .copied()
+            .filter(|&cli| adapters::installed(cli))
+            .collect::<Vec<_>>();
+        if !installed.is_empty() {
+            let report = mount::mount(&installed)?;
+            println!("Mounted startup auto-sync:");
+            for line in report.lines {
+                println!("  [+] {line}");
+            }
+        }
+    }
+
+    Ok(clis)
+}
+
+fn leave_project() -> util::R<()> {
+    project::leave()?;
+    config::remove_project()?;
+    println!("Left project sync:");
+    println!("  project: {}", paths::project_root().display());
+    println!("  removed: {}", paths::project_config().display());
+    println!("  kept:    AGENTS.md and .agents/skills");
+    Ok(())
+}
+
+fn finish() -> util::R<()> {
     println!();
-    println!("Running initial sync...");
+    println!("Running sync...");
     sync::run(&sync::Options {
         prune: false,
         quiet: false,
@@ -86,7 +168,6 @@ pub fn run(args: &[String]) -> util::R<()> {
     println!();
     println!("Current status:");
     crate::print_status()?;
-
     Ok(())
 }
 
@@ -111,24 +192,6 @@ fn installed_clis() -> Vec<Cli> {
         .into_iter()
         .filter(|&cli| adapters::installed(cli))
         .collect()
-}
-
-fn prompt_scope(default: Scope) -> util::R<Scope> {
-    println!("Sync scope:");
-    println!("  1) global  - sync ~/.config/cli-switch to global CLI config");
-    println!("  2) project - sync the current directory's AGENTS.md/.agents");
-    loop {
-        let input = prompt(&format!("Choose scope [{}]: ", default.id()))?;
-        let trimmed = input.trim();
-        if trimmed.is_empty() {
-            return Ok(default);
-        }
-        match trimmed {
-            "1" | "global" => return Ok(Scope::Global),
-            "2" | "project" | "current" | "cwd" => return Ok(Scope::Project),
-            _ => println!("Please enter 1/global or 2/project."),
-        }
-    }
 }
 
 fn prompt_clis(default: &[Cli]) -> util::R<Vec<Cli>> {

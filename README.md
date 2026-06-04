@@ -47,9 +47,10 @@ cargo build --release --target x86_64-pc-windows-gnu     # 產出 cli-switch.exe
 ## 使用
 
 ```bash
-cli-switch configure # 互動設定：全域/當前目錄、CLI 清單、啟動自動同步
+cli-switch           # 互動設定：全域同步 + 目前資料夾專案同步
+cli-switch configure # 同上
 cli-switch init      # 建立 ~/.config/cli-switch 真理來源 + config.toml
-cli-switch sync      # 跑一次完整同步（MCP 合併 + skills/instructions 連結）
+cli-switch sync      # 跑一次完整同步（全域 + 已加入的目前資料夾）
 cli-switch status    # 看各 CLI 安裝狀態、server 數、連結狀態
 cli-switch mount     # 掛載「啟動時自動同步」到各 CLI
 ```
@@ -57,19 +58,19 @@ cli-switch mount     # 掛載「啟動時自動同步」到各 CLI
 典型首次流程：
 
 ```bash
-cli-switch configure     # 寫 config、掛 startup sync、立即同步一次並顯示 status
+cli-switch     # 寫 config、掛 startup sync、立即同步一次並顯示 status
 ```
 
 非互動設定也可以：
 
 ```bash
-cli-switch configure --scope global --clis installed --yes
-cli-switch configure --scope project --clis claude,codex,kiro --yes
+cli-switch configure --scope global --clis installed --yes   # 只調全域
+cli-switch configure --scope project --clis claude,codex --yes # 只加入/更新目前資料夾
 ```
 
-`--scope global` 會同步使用者全域設定；`--scope project` 會同步**目前工作目錄**。
+全域同步和專案同步可以並存：全域設定存在 `~/.config/cli-switch/config.toml`，每個已加入的資料夾會有自己的 `.cli-switch/config.toml`。
 
-互動模式會先逐項確認要同步的 CLI，再選全域或當前目錄同步；設定完成後會立即同步一次並顯示 status。非互動模式仍可用 `--clis installed`、`--clis all` 或 `--clis claude,codex`。
+互動模式會先問是否設定全域同步，再問目前資料夾是否加入專案同步；設定完成後會立即同步一次並顯示 status。非互動模式仍可用 `--clis installed`、`--clis all` 或 `--clis claude,codex`。
 
 ### sync 選項
 
@@ -81,10 +82,10 @@ cli-switch configure --scope project --clis claude,codex,kiro --yes
 
 ### status 會顯示什麼
 
-`cli-switch status` 會依目前 config 的 scope 顯示同步狀態：
+`cli-switch status` 會同時顯示：
 
-- `global`：canonical store、每個 CLI 是否啟用、是否安裝、MCP 數量、instructions/skills 連結狀態、startup hook 狀態。
-- `project`：目前目錄是否有 `AGENTS.md`、`.agents/skills`、Antigravity rule，以及每個 CLI 的 project instructions/skills 是否已連好。
+- 全域同步：canonical store、每個 CLI 是否啟用、是否安裝、MCP 數量、instructions/skills 連結狀態、startup hook 狀態。
+- 目前資料夾專案同步：是否已加入、是否有 `AGENTS.md`、`.agents/skills`、Antigravity rule，以及每個 CLI 的 project instructions/skills 是否已連好。
 
 Global status 的 `state` 欄位中，`active` 代表已選且已安裝、`skipped` 代表已選但本機未安裝、`off` 代表未選。
 Global status 的 `skills` 欄位是 `synced/expected`，只計算 cli-switch canonical skills 的 symlink，不計入 CLI 目錄裡其他既有 symlink。
@@ -108,7 +109,7 @@ backups/          # 每次寫入前的各 CLI 原檔備份
 
 ## 當前目錄同步（project scope）
 
-`cli-switch configure --scope project` 會把目前目錄設成專案層級同步。這個模式不碰全域 MCP；它把專案內的 instructions/skills 拉成同一份：
+在 `cli-switch` 互動設定中啟用目前資料夾專案同步，會建立 `.cli-switch/config.toml` 作為加入標記。這個模式不碰全域 MCP；它把專案內的 instructions/skills 拉成同一份：
 
 ```
 AGENTS.md          # 專案指令檔 SSOT；不存在時會自動建立

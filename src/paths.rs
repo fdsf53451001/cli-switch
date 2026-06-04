@@ -42,6 +42,15 @@ pub fn store_instructions() -> PathBuf {
 pub fn store_config() -> PathBuf {
     store_root().join("config.toml")
 }
+pub fn project_root() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+pub fn project_config_dir() -> PathBuf {
+    project_root().join(".cli-switch")
+}
+pub fn project_config() -> PathBuf {
+    project_config_dir().join("config.toml")
+}
 pub fn store_state_dir() -> PathBuf {
     store_root().join("state")
 }

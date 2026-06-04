@@ -1,0 +1,9 @@
+# cli-switch project configuration.
+scope = "project"
+
+clis = ["claude", "codex", "opencode", "kiro", "antigravity"]
+
+[features]
+mcp = false
+skills = true
+instructions = true

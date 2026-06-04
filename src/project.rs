@@ -52,6 +52,42 @@ pub fn sync(clis: &[Cli], opts: &Options) -> R<Outcome> {
     Ok(out)
 }
 
+pub fn leave() -> R<()> {
+    let root = std::env::current_dir().map_err(|e| e.to_string())?;
+    let agents = root.join("AGENTS.md");
+    let skills = root.join(".agents").join("skills");
+    remove_symlink_if_target(&root.join("CLAUDE.md"), &agents)?;
+    remove_symlink_if_target(
+        &root.join(".kiro").join("steering").join("AGENTS.md"),
+        &agents,
+    )?;
+    remove_symlink_if_target(&root.join(".claude").join("skills"), &skills)?;
+    remove_symlink_if_target(&root.join(".kiro").join("skills"), &skills)?;
+
+    let antigravity_rule = root.join(".agents").join("rules").join("agents-root.md");
+    if fs::read_to_string(&antigravity_rule)
+        .map(|text| text.contains("@/AGENTS.md"))
+        .unwrap_or(false)
+    {
+        fs::remove_file(&antigravity_rule).map_err(|e| util::ctx(&antigravity_rule, e))?;
+    }
+    Ok(())
+}
+
+fn remove_symlink_if_target(link: &Path, target: &Path) -> R<()> {
+    let Ok(meta) = link.symlink_metadata() else {
+        return Ok(());
+    };
+    if meta.file_type().is_symlink()
+        && fs::read_link(link)
+            .map(|current| current == target)
+            .unwrap_or(false)
+    {
+        fs::remove_file(link).map_err(|e| util::ctx(link, e))?;
+    }
+    Ok(())
+}
+
 fn ensure_agents_file(path: &Path, out: &mut Outcome) -> R<()> {
     if path.exists() {
         return Ok(());
