@@ -1,10 +1,10 @@
 //! Orchestration: run one full sync pass (MCP merge + skills/instructions links).
 
-use crate::config::{self, Config};
+use crate::config::{self, Config, Scope};
 use crate::merge::{self, CliState};
 use crate::model::{Canonical, Cli};
 use crate::util::{mtime_secs, R};
-use crate::{adapters, links, paths, store};
+use crate::{adapters, links, paths, project, store};
 use std::collections::BTreeSet;
 
 pub struct Options {
@@ -36,9 +36,13 @@ pub fn run(opts: &Options) -> R<()> {
     };
 
     let cfg = config::load()?;
-    let active = config::active_clis(&cfg);
-
     let mut log = Logger { quiet: opts.quiet };
+
+    if cfg.scope == Scope::Project {
+        return sync_project(&cfg, opts, &mut log);
+    }
+
+    let active = config::active_clis(&cfg);
 
     if active.is_empty() {
         log.info("No configured CLI is installed — nothing to sync.");
@@ -76,6 +80,43 @@ pub fn run(opts: &Options) -> R<()> {
         }
     }
 
+    log.info("Done.");
+    Ok(())
+}
+
+fn sync_project(cfg: &Config, opts: &Options, log: &mut Logger) -> R<()> {
+    if cfg.clis.is_empty() {
+        log.info("No configured CLI is selected — nothing to sync.");
+        return Ok(());
+    }
+    log.info(&format!(
+        "Syncing current directory for {} CLI(s): {}",
+        cfg.clis.len(),
+        cfg.clis
+            .iter()
+            .map(|c| c.id())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+
+    let out = project::sync(
+        &cfg.clis,
+        &project::Options {
+            instructions: cfg.instructions,
+            skills: cfg.skills,
+            dry_run: opts.dry_run,
+        },
+    )?;
+
+    for action in out.actions {
+        log.info(&format!("  project: {action}"));
+    }
+    for note in out.notes {
+        log.debug(&format!("  project: {note}"));
+    }
+    for conflict in out.conflicts {
+        log.warn(&format!("  project: {conflict}"));
+    }
     log.info("Done.");
     Ok(())
 }

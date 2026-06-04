@@ -3,11 +3,13 @@
 
 mod adapters;
 mod config;
+mod configure;
 mod links;
 mod merge;
 mod model;
 mod mount;
 mod paths;
+mod project;
 mod store;
 mod sync;
 mod util;
@@ -36,6 +38,7 @@ fn dispatch(args: &[String]) -> R<()> {
         "sync" => cmd_sync(rest),
         "status" => cmd_status(),
         "mount" => cmd_mount(rest),
+        "configure" | "config" => configure::run(rest),
         "init" => cmd_init(),
         "-V" | "--version" | "version" => {
             println!("agent-sync {VERSION}");
@@ -113,6 +116,7 @@ fn cmd_status() -> R<()> {
 
     println!("agent-sync {VERSION}");
     println!("store: {}", paths::store_root().display());
+    println!("scope: {}", cfg.scope.id());
     println!(
         "canonical: {} MCP server(s), instructions={}, skills={}",
         canonical.servers.len(),
@@ -220,6 +224,7 @@ USAGE:
     agent-sync <command> [options]
 
 COMMANDS:
+    configure       Interactive setup: choose global/project scope, CLIs, and startup sync
     init            Create the canonical store (~/.config/agent-sync) and config
     sync            Run a full sync (MCP merge + skills/instructions links)
         --prune       remove servers gone from every CLI (default: keep + warn)
@@ -231,11 +236,16 @@ COMMANDS:
 
 CLIs: claude, codex, opencode, kiro, antigravity
 
-The store at ~/.config/agent-sync is the single source of truth:
+Global sync store at ~/.config/agent-sync:
     mcp.json        canonical MCP servers (neutral format)
     AGENTS.md       shared instructions (symlinked into every CLI)
     skills/         shared SKILL.md folders (symlinked into every CLI)
     config.toml     which CLIs / features to sync
+
+Project sync uses the current directory:
+    AGENTS.md       project instructions source of truth
+    .agents/skills/ shared project skills
+    .agents/rules/  Antigravity rule files
 "#
     );
 }

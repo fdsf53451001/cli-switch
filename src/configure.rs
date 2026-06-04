@@ -1,0 +1,193 @@
+//! Interactive configuration wizard.
+
+use crate::adapters;
+use crate::config::{self, Config, Scope};
+use crate::model::Cli;
+use crate::{mount, paths, project, store, util};
+use std::io::{self, Write};
+
+pub fn run(args: &[String]) -> util::R<()> {
+    let existing = config::load().unwrap_or_default();
+    let scope_arg = arg_value(args, "--scope").and_then(|s| Scope::from_id(&s));
+    let clis_arg = arg_value(args, "--clis").map(parse_clis);
+    let yes = has_flag(args, "--yes") || has_flag(args, "-y");
+    let no_mount = has_flag(args, "--no-mount");
+
+    let scope = match (scope_arg, yes) {
+        (Some(scope), _) => scope,
+        (None, true) => existing.scope,
+        (None, false) => prompt_scope(existing.scope)?,
+    };
+
+    let clis = match (clis_arg, yes) {
+        (Some(clis), _) => clis,
+        (None, true) => default_clis(),
+        (None, false) => prompt_clis(&existing.clis)?,
+    };
+
+    if scope == Scope::Global {
+        store::ensure_scaffold()?;
+    } else {
+        util::ensure_dir(&paths::store_root())?;
+    }
+
+    let cfg = Config {
+        scope,
+        clis: clis.clone(),
+        mcp: scope == Scope::Global,
+        skills: true,
+        instructions: true,
+    };
+    config::save(&cfg)?;
+
+    println!("Configured agent-sync:");
+    println!("  scope: {}", scope.id());
+    println!(
+        "  clis:  {}",
+        clis.iter().map(|c| c.id()).collect::<Vec<_>>().join(", ")
+    );
+    println!("  config: {}", paths::store_config().display());
+
+    if scope == Scope::Project {
+        let out = project::sync(
+            &clis,
+            &project::Options {
+                instructions: true,
+                skills: true,
+                dry_run: false,
+            },
+        )?;
+        report_project(out);
+    }
+
+    if !no_mount {
+        let installed = clis
+            .iter()
+            .copied()
+            .filter(|&cli| adapters::installed(cli))
+            .collect::<Vec<_>>();
+        if installed.is_empty() {
+            println!("No selected CLI is installed; startup auto-sync was not mounted.");
+        } else {
+            let report = mount::mount(&installed)?;
+            println!("Mounted startup auto-sync:");
+            for line in report.lines {
+                println!("  [+] {line}");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn has_flag(args: &[String], flag: &str) -> bool {
+    args.iter().any(|a| a == flag)
+}
+
+fn arg_value(args: &[String], key: &str) -> Option<String> {
+    for (idx, arg) in args.iter().enumerate() {
+        if arg == key {
+            return args.get(idx + 1).cloned();
+        }
+        if let Some(rest) = arg.strip_prefix(&format!("{key}=")) {
+            return Some(rest.to_string());
+        }
+    }
+    None
+}
+
+fn parse_clis(s: String) -> Vec<Cli> {
+    match s.as_str() {
+        "all" => Cli::ALL.to_vec(),
+        "installed" => default_clis(),
+        _ => s
+            .split(',')
+            .filter_map(|part| Cli::from_id(part.trim()))
+            .collect(),
+    }
+}
+
+fn default_clis() -> Vec<Cli> {
+    Cli::ALL
+        .into_iter()
+        .filter(|&cli| adapters::installed(cli))
+        .collect()
+}
+
+fn prompt_scope(default: Scope) -> util::R<Scope> {
+    println!("Sync scope:");
+    println!("  1) global  - sync ~/.config/agent-sync to global CLI config");
+    println!("  2) project - sync the current directory's AGENTS.md/.agents");
+    loop {
+        let input = prompt(&format!("Choose scope [{}]: ", default.id()))?;
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Ok(default);
+        }
+        match trimmed {
+            "1" | "global" => return Ok(Scope::Global),
+            "2" | "project" | "current" | "cwd" => return Ok(Scope::Project),
+            _ => println!("Please enter 1/global or 2/project."),
+        }
+    }
+}
+
+fn prompt_clis(existing: &[Cli]) -> util::R<Vec<Cli>> {
+    println!();
+    println!("Install/sync which CLIs?");
+    let mut out = Vec::new();
+    for cli in Cli::ALL {
+        let installed = adapters::installed(cli);
+        let default = existing.contains(&cli) || installed;
+        let marker = if installed {
+            "installed"
+        } else {
+            "not installed"
+        };
+        if prompt_yes_no(&format!("  {} ({})", cli.id(), marker), default)? {
+            out.push(cli);
+        }
+    }
+    Ok(out)
+}
+
+fn prompt_yes_no(label: &str, default: bool) -> util::R<bool> {
+    let suffix = if default { "[Y/n]" } else { "[y/N]" };
+    loop {
+        let input = prompt(&format!("{label} {suffix}: "))?;
+        let trimmed = input.trim().to_ascii_lowercase();
+        if trimmed.is_empty() {
+            return Ok(default);
+        }
+        match trimmed.as_str() {
+            "y" | "yes" => return Ok(true),
+            "n" | "no" => return Ok(false),
+            _ => println!("Please enter y or n."),
+        }
+    }
+}
+
+fn prompt(message: &str) -> util::R<String> {
+    print!("{message}");
+    io::stdout().flush().map_err(|e| e.to_string())?;
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| e.to_string())?;
+    Ok(input)
+}
+
+fn report_project(out: project::Outcome) {
+    if !out.actions.is_empty() {
+        println!("Project sync:");
+        for action in out.actions {
+            println!("  [+] {action}");
+        }
+    }
+    for note in out.notes {
+        println!("  [-] {note}");
+    }
+    for conflict in out.conflicts {
+        eprintln!("  [!] {conflict}");
+    }
+}

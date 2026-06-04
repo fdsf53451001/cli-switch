@@ -47,6 +47,7 @@ cargo build --release --target x86_64-pc-windows-gnu     # 產出 agent-sync.exe
 ## 使用
 
 ```bash
+agent-sync configure # 互動設定：全域/當前目錄、CLI 清單、啟動自動同步
 agent-sync init      # 建立 ~/.config/agent-sync 真理來源 + config.toml
 agent-sync sync      # 跑一次完整同步（MCP 合併 + skills/instructions 連結）
 agent-sync status    # 看各 CLI 安裝狀態、server 數、連結狀態
@@ -56,11 +57,19 @@ agent-sync mount     # 掛載「啟動時自動同步」到各 CLI
 典型首次流程：
 
 ```bash
-agent-sync init
+agent-sync configure     # 建議使用；會寫 config 並對已安裝 CLI 掛 startup sync
 agent-sync sync          # 把你現有各家設定吸進真理來源並互相散播
-agent-sync mount         # 之後各 CLI 啟動就自動 sync
 agent-sync status
 ```
+
+非互動設定也可以：
+
+```bash
+agent-sync configure --scope global --clis installed --yes
+agent-sync configure --scope project --clis claude,codex,kiro --yes
+```
+
+`--scope global` 會同步使用者全域設定；`--scope project` 會同步**目前工作目錄**。
 
 ### sync 選項
 
@@ -84,6 +93,30 @@ backups/          # 每次寫入前的各 CLI 原檔備份
 ```
 
 直接編輯 `mcp.json` / `AGENTS.md` / `skills/` 是最乾淨的更新方式；也可以在任一 CLI 裡改，`sync` 會合併回來。
+
+---
+
+## 當前目錄同步（project scope）
+
+`agent-sync configure --scope project` 會把目前目錄設成專案層級同步。這個模式不碰全域 MCP；它把專案內的 instructions/skills 拉成同一份：
+
+```
+AGENTS.md          # 專案指令檔 SSOT，必須先存在
+.agents/skills/    # 專案共用 skills
+.agents/rules/     # Antigravity rules
+```
+
+依選到的 CLI，`sync` 會建立：
+
+| CLI | project instructions | project skills |
+|-----|----------------------|----------------|
+| Claude Code | `CLAUDE.md -> AGENTS.md` | `.claude/skills -> .agents/skills` |
+| Codex | 直接讀 `AGENTS.md` | 直接使用 `.agents/skills` |
+| opencode | 直接讀 `AGENTS.md` | 直接使用 `.agents/skills` |
+| Kiro | `.kiro/steering/AGENTS.md -> AGENTS.md` | `.kiro/skills -> .agents/skills` |
+| Antigravity | 建立 `.agents/rules/agents-root.md`，內容 `@/AGENTS.md` | 直接使用 `.agents/skills` |
+
+如果目標位置已經有真實檔案或目錄，`agent-sync` 只會報衝突，不會覆蓋；先手動 merge 到 `AGENTS.md` 或 `.agents/skills/` 後再重跑。
 
 ---
 
