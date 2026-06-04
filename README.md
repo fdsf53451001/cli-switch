@@ -81,6 +81,13 @@ cli-switch configure --scope project --clis claude,codex,kiro --yes
 | `--prune` | 把「已從所有 CLI 移除」的 server 真正刪掉（預設只隔離+警告） |
 | `--quiet` | 只印警告/錯誤（啟動 hook 用） |
 
+### status 會顯示什麼
+
+`cli-switch status` 會依目前 config 的 scope 顯示同步狀態：
+
+- `global`：canonical store、每個 CLI 是否啟用、是否安裝、MCP 數量、instructions/skills 連結狀態、startup hook 狀態。
+- `project`：目前目錄是否有 `AGENTS.md`、`.agents/skills`、Antigravity rule，以及每個 CLI 的 project instructions/skills 是否已連好。
+
 ---
 
 ## 真理來源（`~/.config/cli-switch/`）

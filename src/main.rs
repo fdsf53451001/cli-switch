@@ -112,11 +112,27 @@ fn cmd_mount(args: &[String]) -> R<()> {
 
 fn cmd_status() -> R<()> {
     let cfg = config::load()?;
-    let canonical = store::load_canonical()?;
 
     println!("cli-switch {VERSION}");
     println!("store: {}", paths::store_root().display());
     println!("scope: {}", cfg.scope.id());
+    println!(
+        "selected CLIs: {}",
+        cfg.clis
+            .iter()
+            .map(|c| c.id())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    match cfg.scope {
+        config::Scope::Global => status_global(&cfg),
+        config::Scope::Project => status_project(&cfg),
+    }
+}
+
+fn status_global(cfg: &config::Config) -> R<()> {
+    let canonical = store::load_canonical()?;
     println!(
         "canonical: {} MCP server(s), instructions={}, skills={}",
         canonical.servers.len(),
@@ -125,29 +141,40 @@ fn cmd_status() -> R<()> {
     );
     println!();
     println!(
-        "{:<13} {:<10} {:<7} {:<13} {:<8}",
-        "CLI", "installed", "mcp", "instructions", "skills"
+        "{:<13} {:<8} {:<10} {:<7} {:<13} {:<8} {:<10}",
+        "CLI", "sync", "installed", "mcp", "instructions", "skills", "startup"
     );
-    println!("{}", "-".repeat(54));
+    println!("{}", "-".repeat(78));
 
     for cli in Cli::ALL {
         let installed = adapters::installed(cli);
         let configured = cfg.clis.contains(&cli);
-        let mcp_n = if installed {
-            adapters::read_mcp(cli).map(|m| m.len()).unwrap_or(0)
+        let mcp_n = if configured && installed {
+            adapters::read_mcp(cli)
+                .map(|m| m.len().to_string())
+                .unwrap_or_else(|_| "?".to_string())
         } else {
-            0
+            "-".to_string()
         };
-        let instr = link_state(&paths::instructions_file(cli), &paths::store_instructions());
-        let skills_n = count_links(&paths::skills_dir(cli));
-        let tag = if !configured { " (off)" } else { "" };
+        let instr = if configured {
+            link_state(&paths::instructions_file(cli), &paths::store_instructions())
+        } else {
+            "off"
+        };
+        let skills = if configured {
+            count_links(&paths::skills_dir(cli)).to_string()
+        } else {
+            "-".to_string()
+        };
         println!(
-            "{:<13} {:<10} {:<7} {:<13} {:<8}",
-            format!("{}{}", cli.id(), tag),
+            "{:<13} {:<8} {:<10} {:<7} {:<13} {:<8} {:<10}",
+            cli.id(),
+            yn(configured),
             yn(installed),
             mcp_n,
             instr,
-            skills_n
+            skills,
+            startup_state(cli)
         );
     }
 
@@ -168,11 +195,117 @@ fn cmd_status() -> R<()> {
     Ok(())
 }
 
+fn status_project(cfg: &config::Config) -> R<()> {
+    let root = std::env::current_dir().map_err(|e| e.to_string())?;
+    let agents = root.join("AGENTS.md");
+    let skills = root.join(".agents").join("skills");
+    let antigravity_rule = root.join(".agents").join("rules").join("agents-root.md");
+
+    println!("project: {}", root.display());
+    println!("AGENTS.md: {}", yn(agents.exists()));
+    println!(
+        ".agents/skills: {} skill dir(s)",
+        if skills.exists() {
+            count_dirs(&skills)
+        } else {
+            0
+        }
+    );
+    println!(
+        "antigravity rule: {}",
+        antigravity_rule_state(&antigravity_rule)
+    );
+    println!();
+    println!(
+        "{:<13} {:<8} {:<10} {:<18} {:<18} {:<10}",
+        "CLI", "sync", "installed", "instructions", "skills", "startup"
+    );
+    println!("{}", "-".repeat(82));
+
+    for cli in Cli::ALL {
+        let configured = cfg.clis.contains(&cli);
+        let instructions = if configured {
+            project_instruction_state(cli, &root, &agents, &antigravity_rule)
+        } else {
+            "off"
+        };
+        let skills_state = if configured {
+            project_skills_state(cli, &root, &skills)
+        } else {
+            "off"
+        };
+        println!(
+            "{:<13} {:<8} {:<10} {:<18} {:<18} {:<10}",
+            cli.id(),
+            yn(configured),
+            yn(adapters::installed(cli)),
+            instructions,
+            skills_state,
+            startup_state(cli)
+        );
+    }
+
+    if !agents.exists() {
+        println!();
+        println!("Project sync is not ready: create AGENTS.md, then run `cli-switch sync`.");
+    }
+    Ok(())
+}
+
 fn yn(b: bool) -> &'static str {
     if b {
         "yes"
     } else {
         "no"
+    }
+}
+
+fn project_instruction_state(
+    cli: Cli,
+    root: &std::path::Path,
+    agents: &std::path::Path,
+    antigravity_rule: &std::path::Path,
+) -> &'static str {
+    match cli {
+        Cli::Claude => link_state(&root.join("CLAUDE.md"), agents),
+        Cli::Codex | Cli::Opencode => {
+            if agents.exists() {
+                "direct"
+            } else {
+                "missing"
+            }
+        }
+        Cli::Kiro => link_state(
+            &root.join(".kiro").join("steering").join("AGENTS.md"),
+            agents,
+        ),
+        Cli::Antigravity => antigravity_rule_state(antigravity_rule),
+    }
+}
+
+fn project_skills_state(
+    cli: Cli,
+    root: &std::path::Path,
+    skills: &std::path::Path,
+) -> &'static str {
+    match cli {
+        Cli::Claude => link_state(&root.join(".claude").join("skills"), skills),
+        Cli::Kiro => link_state(&root.join(".kiro").join("skills"), skills),
+        Cli::Codex | Cli::Opencode | Cli::Antigravity => {
+            if skills.exists() {
+                "direct"
+            } else {
+                "missing"
+            }
+        }
+    }
+}
+
+fn antigravity_rule_state(path: &std::path::Path) -> &'static str {
+    match std::fs::read_to_string(path) {
+        Ok(text) if text.contains("@/AGENTS.md") => "rule",
+        Ok(_) => "custom",
+        Err(_) => "missing",
     }
 }
 
@@ -200,6 +333,20 @@ fn count_links(dir: &std::path::Path) -> usize {
                 .count()
         })
         .unwrap_or(0)
+}
+
+fn startup_state(cli: Cli) -> &'static str {
+    let path = match cli {
+        Cli::Claude => paths::claude_settings(),
+        Cli::Codex => paths::codex_hooks(),
+        Cli::Opencode => paths::opencode_plugin(),
+        Cli::Kiro | Cli::Antigravity => paths::store_root().join("shell-init.sh"),
+    };
+    match std::fs::read_to_string(path) {
+        Ok(text) if text.contains("cli-switch") || text.contains("__cli_switch_run") => "mounted",
+        Ok(_) => "custom",
+        Err(_) => "missing",
+    }
 }
 
 fn link_state(link: &std::path::Path, want: &std::path::Path) -> &'static str {
