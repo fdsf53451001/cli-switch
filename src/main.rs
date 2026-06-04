@@ -148,11 +148,7 @@ pub(crate) fn print_status() -> R<()> {
     println!("Global sync");
     println!(
         "selected CLIs: {}",
-        cfg.clis
-            .iter()
-            .map(|c| c.id())
-            .collect::<Vec<_>>()
-            .join(", ")
+        cli_list(&cfg.clis).unwrap_or_else(|| "none".to_string())
     );
     status_global(&cfg)?;
 
@@ -175,15 +171,15 @@ fn status_global(cfg: &config::Config) -> R<()> {
     println!(
         "canonical: {} MCP server(s), instructions={}, skills={}",
         canonical.servers.len(),
-        yn(paths::store_instructions().exists()),
+        file_state(paths::store_instructions().exists()),
         canonical_skill_count
     );
     println!();
     println!(
-        "{:<13} {:<8} {:<10} {:<7} {:<13} {:<8} {:<10}",
-        "CLI", "state", "installed", "mcp", "instructions", "skills", "startup"
+        "{:<13} {:<8} {:<10} {:<7} {:<13} {:<8} {:<12}",
+        "CLI", "state", "app", "mcp", "instructions", "skills", "startup"
     );
-    println!("{}", "-".repeat(78));
+    println!("{}", "-".repeat(80));
 
     for cli in Cli::ALL {
         let installed = adapters::installed(cli);
@@ -216,10 +212,10 @@ fn status_global(cfg: &config::Config) -> R<()> {
             "-".to_string()
         };
         println!(
-            "{:<13} {:<8} {:<10} {:<7} {:<13} {:<8} {:<10}",
+            "{:<13} {:<8} {:<10} {:<7} {:<13} {:<8} {:<12}",
             cli.id(),
             state,
-            yn(installed),
+            installed_state(installed),
             mcp_n,
             instr,
             skills,
@@ -259,7 +255,7 @@ fn status_project(cfg: &config::Config) -> R<()> {
     let antigravity_rule = root.join(".agents").join("rules").join("agents-root.md");
 
     println!("project: {}", root.display());
-    println!("AGENTS.md: {}", yn(agents.exists()));
+    println!("AGENTS.md: {}", file_state(agents.exists()));
     println!(
         ".agents/skills: {} skill dir(s)",
         if skills.exists() {
@@ -274,10 +270,10 @@ fn status_project(cfg: &config::Config) -> R<()> {
     );
     println!();
     println!(
-        "{:<13} {:<8} {:<10} {:<18} {:<18} {:<10}",
-        "CLI", "sync", "installed", "instructions", "skills", "startup"
+        "{:<13} {:<9} {:<10} {:<18} {:<18} {:<12}",
+        "CLI", "project", "app", "instructions", "skills", "startup"
     );
-    println!("{}", "-".repeat(82));
+    println!("{}", "-".repeat(86));
 
     for cli in Cli::ALL {
         let configured = cfg.clis.contains(&cli);
@@ -292,10 +288,10 @@ fn status_project(cfg: &config::Config) -> R<()> {
             "off"
         };
         println!(
-            "{:<13} {:<8} {:<10} {:<18} {:<18} {:<10}",
+            "{:<13} {:<9} {:<10} {:<18} {:<18} {:<12}",
             cli.id(),
-            yn(configured),
-            yn(adapters::installed(cli)),
+            enabled_state(configured),
+            installed_state(adapters::installed(cli)),
             instructions,
             skills_state,
             startup_state(cli)
@@ -309,11 +305,35 @@ fn status_project(cfg: &config::Config) -> R<()> {
     Ok(())
 }
 
-fn yn(b: bool) -> &'static str {
-    if b {
-        "yes"
+fn enabled_state(enabled: bool) -> &'static str {
+    if enabled {
+        "enabled"
     } else {
-        "no"
+        "off"
+    }
+}
+
+fn installed_state(installed: bool) -> &'static str {
+    if installed {
+        "installed"
+    } else {
+        "not found"
+    }
+}
+
+fn file_state(exists: bool) -> &'static str {
+    if exists {
+        "present"
+    } else {
+        "missing"
+    }
+}
+
+fn cli_list(clis: &[Cli]) -> Option<String> {
+    if clis.is_empty() {
+        None
+    } else {
+        Some(clis.iter().map(|c| c.id()).collect::<Vec<_>>().join(", "))
     }
 }
 
@@ -391,7 +411,10 @@ fn startup_state(cli: Cli) -> &'static str {
         Cli::Kiro | Cli::Antigravity => unreachable!(),
     };
     match std::fs::read_to_string(path) {
-        Ok(text) if text.contains("cli-switch") || text.contains("__cli_switch_run") => "mounted",
+        Ok(text) if text.contains("cli-switch") || text.contains("__cli_switch_run") => match cli {
+            Cli::Opencode => "plugin",
+            _ => "hook",
+        },
         Ok(_) => "custom",
         Err(_) => "missing",
     }
@@ -399,7 +422,7 @@ fn startup_state(cli: Cli) -> &'static str {
 
 fn antigravity_startup_state() -> &'static str {
     match std::fs::read_to_string(paths::antigravity_hooks()) {
-        Ok(text) if text.contains("cli-switch-sync") && text.contains("PreInvocation") => "mounted",
+        Ok(text) if text.contains("cli-switch-sync") && text.contains("PreInvocation") => "hook",
         Ok(_) => "custom",
         Err(_) => "missing",
     }
@@ -413,7 +436,7 @@ fn shell_startup_state() -> &'static str {
     if !init_text.contains("__cli_switch_run") {
         return "custom";
     }
-    "written"
+    "wrapper"
 }
 
 fn count_synced_skill_links(cli_dir: &std::path::Path, store_skills: &std::path::Path) -> usize {
