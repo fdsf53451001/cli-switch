@@ -71,6 +71,8 @@ cli-switch configure --scope project --clis claude,codex,kiro --yes
 
 `--scope global` 會同步使用者全域設定；`--scope project` 會同步**目前工作目錄**。
 
+互動模式會先列出 CLI，直接輸入 `1,2,5`、`1 2 5`、`claude,codex`、`installed` 或 `all` 即可一次選好。
+
 ### sync 選項
 
 | 旗標 | 作用 |

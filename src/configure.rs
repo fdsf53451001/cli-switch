@@ -7,22 +7,32 @@ use crate::{mount, paths, project, store, util};
 use std::io::{self, Write};
 
 pub fn run(args: &[String]) -> util::R<()> {
+    let has_config = paths::store_config().exists();
     let existing = config::load().unwrap_or_default();
     let scope_arg = arg_value(args, "--scope").and_then(|s| Scope::from_id(&s));
-    let clis_arg = arg_value(args, "--clis").map(parse_clis);
+    let clis_arg = match arg_value(args, "--clis") {
+        Some(raw) => Some(parse_cli_selection(&raw, &[])?),
+        None => None,
+    };
     let yes = has_flag(args, "--yes") || has_flag(args, "-y");
     let no_mount = has_flag(args, "--no-mount");
+
+    let default_clis = if has_config {
+        existing.clis.clone()
+    } else {
+        installed_clis()
+    };
+
+    let clis = match (clis_arg, yes) {
+        (Some(clis), _) => clis,
+        (None, true) => default_clis,
+        (None, false) => prompt_clis(&default_clis)?,
+    };
 
     let scope = match (scope_arg, yes) {
         (Some(scope), _) => scope,
         (None, true) => existing.scope,
         (None, false) => prompt_scope(existing.scope)?,
-    };
-
-    let clis = match (clis_arg, yes) {
-        (Some(clis), _) => clis,
-        (None, true) => default_clis(),
-        (None, false) => prompt_clis(&existing.clis)?,
     };
 
     if scope == Scope::Global {
@@ -96,18 +106,7 @@ fn arg_value(args: &[String], key: &str) -> Option<String> {
     None
 }
 
-fn parse_clis(s: String) -> Vec<Cli> {
-    match s.as_str() {
-        "all" => Cli::ALL.to_vec(),
-        "installed" => default_clis(),
-        _ => s
-            .split(',')
-            .filter_map(|part| Cli::from_id(part.trim()))
-            .collect(),
-    }
-}
-
-fn default_clis() -> Vec<Cli> {
+fn installed_clis() -> Vec<Cli> {
     Cli::ALL
         .into_iter()
         .filter(|&cli| adapters::installed(cli))
@@ -132,38 +131,73 @@ fn prompt_scope(default: Scope) -> util::R<Scope> {
     }
 }
 
-fn prompt_clis(existing: &[Cli]) -> util::R<Vec<Cli>> {
+fn prompt_clis(default: &[Cli]) -> util::R<Vec<Cli>> {
     println!();
-    println!("Install/sync which CLIs?");
-    let mut out = Vec::new();
-    for cli in Cli::ALL {
-        let installed = adapters::installed(cli);
-        let default = existing.contains(&cli) || installed;
+    println!("Select CLIs to install/sync:");
+    for (idx, cli) in Cli::ALL.iter().enumerate() {
+        let installed = adapters::installed(*cli);
         let marker = if installed {
             "installed"
         } else {
             "not installed"
         };
-        if prompt_yes_no(&format!("  {} ({})", cli.id(), marker), default)? {
-            out.push(cli);
+        let selected = if default.contains(cli) { " *" } else { "" };
+        println!("  {}) {:<12} {}{}", idx + 1, cli.id(), marker, selected);
+    }
+    println!("Enter numbers or names separated by commas/spaces. Shortcuts: all, installed.");
+    let default_label = if default.is_empty() {
+        "none".to_string()
+    } else {
+        default.iter().map(|c| c.id()).collect::<Vec<_>>().join(",")
+    };
+    loop {
+        let input = prompt(&format!("CLIs [{default_label}]: "))?;
+        match parse_cli_selection(&input, default) {
+            Ok(clis) if !clis.is_empty() => return Ok(clis),
+            Ok(_) => println!("Select at least one CLI."),
+            Err(e) => println!("{e}"),
         }
     }
-    Ok(out)
 }
 
-fn prompt_yes_no(label: &str, default: bool) -> util::R<bool> {
-    let suffix = if default { "[Y/n]" } else { "[y/N]" };
-    loop {
-        let input = prompt(&format!("{label} {suffix}: "))?;
-        let trimmed = input.trim().to_ascii_lowercase();
-        if trimmed.is_empty() {
-            return Ok(default);
+fn parse_cli_selection(input: &str, default: &[Cli]) -> util::R<Vec<Cli>> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(default.to_vec());
+    }
+    match trimmed {
+        "all" => return Ok(Cli::ALL.to_vec()),
+        "installed" => return Ok(installed_clis()),
+        _ => {}
+    }
+
+    let mut out = Vec::new();
+    let mut invalid = Vec::new();
+    for raw in trimmed.split(|c: char| c == ',' || c.is_whitespace()) {
+        let token = raw.trim();
+        if token.is_empty() {
+            continue;
         }
-        match trimmed.as_str() {
-            "y" | "yes" => return Ok(true),
-            "n" | "no" => return Ok(false),
-            _ => println!("Please enter y or n."),
+        let cli = token
+            .parse::<usize>()
+            .ok()
+            .and_then(|n| n.checked_sub(1))
+            .and_then(|idx| Cli::ALL.get(idx).copied())
+            .or_else(|| Cli::from_id(token));
+        match cli {
+            Some(cli) if !out.contains(&cli) => out.push(cli),
+            Some(_) => {}
+            None => invalid.push(token.to_string()),
         }
+    }
+
+    if invalid.is_empty() {
+        Ok(out)
+    } else {
+        Err(format!(
+            "Unknown CLI selection: {}. Use numbers, names, all, or installed.",
+            invalid.join(", ")
+        ))
     }
 }
 

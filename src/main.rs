@@ -224,7 +224,7 @@ USAGE:
     cli-switch <command> [options]
 
 COMMANDS:
-    configure       Interactive setup: choose global/project scope, CLIs, and startup sync
+    configure       Interactive setup: select CLIs, scope, and startup sync
     init            Create the canonical store (~/.config/cli-switch) and config
     sync            Run a full sync (MCP merge + skills/instructions links)
         --prune       remove servers gone from every CLI (default: keep + warn)
