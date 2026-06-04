@@ -56,11 +56,13 @@ fn install_claude_hook(exe: &str) -> R<String> {
         .as_object_mut()
         .ok_or_else(|| "settings.json is not an object".to_string())?;
 
-    let hooks = obj
+    let hooks_item = obj
         .entry("hooks")
-        .or_insert_with(|| Value::Object(Map::new()))
-        .as_object_mut()
-        .ok_or("hooks is not an object")?;
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !hooks_item.is_object() {
+        *hooks_item = Value::Object(Map::new());
+    }
+    let hooks = hooks_item.as_object_mut().unwrap();
 
     // Drop any prior cli-switch SessionStart group, then add a fresh one.
     let mut groups: Vec<Value> = hooks
@@ -111,26 +113,31 @@ fn install_codex_hook(exe: &str) -> R<String> {
         Some(t) if !t.trim().is_empty() => {
             serde_json::from_str(&t).map_err(|e| util::ctx(&path, e))?
         }
-        _ => json!({ "hooks": [] }),
+        _ => json!({ "hooks": {} }),
     };
     let obj = root.as_object_mut().ok_or("hooks.json is not an object")?;
-    let mut arr: Vec<Value> = obj
-        .get("hooks")
+    let hooks_item = obj
+        .entry("hooks")
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !hooks_item.is_object() {
+        *hooks_item = Value::Object(Map::new());
+    }
+    let hooks = hooks_item.as_object_mut().unwrap();
+    let mut groups: Vec<Value> = hooks
+        .get("SessionStart")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    arr.retain(|h| {
-        h.get("command")
-            .and_then(|c| c.as_str())
-            .map(|c| !c.contains("cli-switch") && !c.contains("agent-sync"))
-            .unwrap_or(true)
-    });
-    arr.push(json!({
-        "matchers": [{ "event": "SessionStart" }],
-        "command": exe,
-        "args": ["sync", "--quiet"]
+    groups.retain(|g| !group_mentions(g, "cli-switch") && !group_mentions(g, "agent-sync"));
+    groups.push(json!({
+        "matcher": "startup|resume",
+        "hooks": [{
+            "type": "command",
+            "command": format!("{exe} sync --quiet"),
+            "statusMessage": "Syncing CLI config"
+        }]
     }));
-    obj.insert("hooks".into(), Value::Array(arr));
+    hooks.insert("SessionStart".into(), Value::Array(groups));
 
     let out = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
     util::write_atomic(&path, &out)?;
