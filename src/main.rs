@@ -34,7 +34,8 @@ fn main() {
 fn dispatch(args: &[String]) -> R<()> {
     let (cmd, rest) = match args.first().map(|s| s.as_str()) {
         None => ("configure", &args[0..]),
-        Some(first) if first.starts_with('-') => ("configure", args),
+        Some("-h" | "--help" | "-V" | "--version") => (args[0].as_str(), &args[1..]),
+        Some(first) if is_configure_option(first) => ("configure", args),
         Some(first) => (first, &args[1..]),
     };
     match cmd {
@@ -53,6 +54,16 @@ fn dispatch(args: &[String]) -> R<()> {
         }
         other => Err(format!("unknown command '{other}' (try `cli-switch help`)")),
     }
+}
+
+fn is_configure_option(arg: &str) -> bool {
+    arg == "--yes"
+        || arg == "-y"
+        || arg == "--no-mount"
+        || arg == "--scope"
+        || arg.starts_with("--scope=")
+        || arg == "--clis"
+        || arg.starts_with("--clis=")
 }
 
 fn has_flag(args: &[String], flag: &str) -> bool {
