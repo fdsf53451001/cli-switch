@@ -42,6 +42,9 @@ pub fn store_instructions() -> PathBuf {
 pub fn store_config() -> PathBuf {
     store_root().join("config.toml")
 }
+pub fn setup_config() -> PathBuf {
+    store_root().join("setup.toml")
+}
 pub fn project_root() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }

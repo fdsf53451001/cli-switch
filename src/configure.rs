@@ -42,11 +42,11 @@ fn run_menu() -> util::R<()> {
         match prompt("Choose [1-6]: ")?.trim() {
             "1" => return setup_cli(),
             "2" => {
-                configure_global(&[], false)?;
+                configure_global_from_setup()?;
                 return finish();
             }
             "3" => {
-                configure_project(&[], false)?;
+                configure_project_from_setup()?;
                 return finish();
             }
             "4" => return remove_cli(),
@@ -138,6 +138,47 @@ fn configure_project(args: &[String], no_prompt: bool) -> util::R<Vec<Cli>> {
     Ok(clis)
 }
 
+fn configure_global_from_setup() -> util::R<()> {
+    let clis = setup_clis()?;
+    store::ensure_scaffold()?;
+    let cfg = Config {
+        scope: Scope::Global,
+        clis: clis.clone(),
+        mcp: true,
+        skills: true,
+        instructions: true,
+    };
+    config::save(&cfg)?;
+    println!("Configured global cli-switch sync:");
+    println!(
+        "  clis:  {}",
+        clis.iter().map(|c| c.id()).collect::<Vec<_>>().join(", ")
+    );
+    println!("  config: {}", paths::store_config().display());
+    Ok(())
+}
+
+fn configure_project_from_setup() -> util::R<()> {
+    let clis = setup_clis()?;
+    util::ensure_dir(&paths::project_config_dir())?;
+    let cfg = Config {
+        scope: Scope::Project,
+        clis: clis.clone(),
+        mcp: false,
+        skills: true,
+        instructions: true,
+    };
+    config::save_project(&cfg)?;
+    println!("Joined project sync:");
+    println!("  project: {}", paths::project_root().display());
+    println!(
+        "  clis:    {}",
+        clis.iter().map(|c| c.id()).collect::<Vec<_>>().join(", ")
+    );
+    println!("  config:  {}", paths::project_config().display());
+    Ok(())
+}
+
 fn setup_cli() -> util::R<()> {
     let default = configured_clis()?;
     let default = if default.is_empty() {
@@ -146,6 +187,8 @@ fn setup_cli() -> util::R<()> {
         default
     };
     let clis = prompt_clis("Setup startup sync for which CLIs?", &default)?;
+    util::ensure_dir(&paths::store_root())?;
+    config::save_setup(&clis)?;
     let installed = clis
         .iter()
         .copied()
@@ -161,6 +204,12 @@ fn setup_cli() -> util::R<()> {
             println!("  [+] {line}");
         }
     }
+    println!("Saved CLI setup:");
+    println!(
+        "  clis:   {}",
+        clis.iter().map(|c| c.id()).collect::<Vec<_>>().join(", ")
+    );
+    println!("  config: {}", paths::setup_config().display());
 
     println!();
     println!("Current status:");
@@ -179,6 +228,10 @@ fn remove_cli() -> util::R<()> {
     let mut global_cfg = config::load()?;
     global_cfg.clis.retain(|cli| !clis.contains(cli));
     config::save(&global_cfg)?;
+
+    let mut setup = config::load_setup()?;
+    setup.retain(|cli| !clis.contains(cli));
+    config::save_setup(&setup)?;
 
     if let Some(mut project_cfg) = config::load_project()? {
         project_cfg.clis.retain(|cli| !clis.contains(cli));
@@ -272,7 +325,12 @@ fn installed_clis() -> Vec<Cli> {
 }
 
 fn configured_clis() -> util::R<Vec<Cli>> {
-    let mut out = config::load()?.clis;
+    let mut out = config::load_setup()?;
+    for cli in config::load()?.clis {
+        if !out.contains(&cli) {
+            out.push(cli);
+        }
+    }
     if let Some(project_cfg) = config::load_project()? {
         for cli in project_cfg.clis {
             if !out.contains(&cli) {
@@ -281,6 +339,14 @@ fn configured_clis() -> util::R<Vec<Cli>> {
         }
     }
     Ok(out)
+}
+
+fn setup_clis() -> util::R<Vec<Cli>> {
+    let clis = config::load_setup()?;
+    if clis.is_empty() {
+        return Err("No CLI setup found. Run `cli-switch`, choose `1) setup cli`, then run this action again.".to_string());
+    }
+    Ok(clis)
 }
 
 fn prompt_clis(title: &str, default: &[Cli]) -> util::R<Vec<Cli>> {
@@ -381,12 +447,12 @@ fn print_help() {
     cli-switch configure [--scope global|project --clis <list> --yes]
 
 Without options, configure opens this menu:
-    1) setup cli
-    2) set global level
-    3) set project level
+    1) setup cli           select CLIs once and install startup sync
+    2) set global level    use the CLI selection from 1
+    3) set project level   use the CLI selection from 1
     4) remove cli
-    5) remove global level
-    6) remove project level
+    5) remove global level no CLI prompt
+    6) remove project level no CLI prompt
 
 Examples:
     cli-switch

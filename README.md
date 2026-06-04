@@ -64,13 +64,15 @@ cli-switch
 互動主選單：
 
 ```text
-1) setup cli             # 安裝/更新各 CLI 的 startup sync hook
-2) set global level      # 啟用/更新使用者全域同步
-3) set project level     # 啟用/更新目前資料夾專案同步
+1) setup cli             # 選一次 CLI，安裝/更新 startup sync hook
+2) set global level      # 用 1 的 CLI 清單啟用/更新使用者全域同步
+3) set project level     # 用 1 的 CLI 清單啟用/更新目前資料夾專案同步
 4) remove cli            # 從設定移除 CLI，並移除 cli-switch startup hook
-5) remove global level   # 停用全域同步，保留 canonical store
-6) remove project level  # 退出目前資料夾專案同步
+5) remove global level   # 停用全域同步，保留 canonical store，不再問 CLI
+6) remove project level  # 退出目前資料夾專案同步，不再問 CLI
 ```
+
+`1) setup cli` 的結果會存在 `~/.config/cli-switch/setup.toml`。之後 `2) set global level` 和 `3) set project level` 直接套用這份 CLI 清單，不會重複問一次。
 
 非互動設定也可以：
 

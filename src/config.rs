@@ -63,6 +63,41 @@ pub fn load_project() -> R<Option<Config>> {
     load_from(&path, Scope::Project).map(Some)
 }
 
+pub fn load_setup() -> R<Vec<Cli>> {
+    let path = paths::setup_config();
+    let Some(text) = util::read_to_string_opt(&path)? else {
+        return Ok(Vec::new());
+    };
+    let doc: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|e: toml_edit::TomlError| util::ctx(&path, e))?;
+    Ok(doc
+        .get("clis")
+        .and_then(|i| i.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .filter_map(Cli::from_id)
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+pub fn save_setup(clis: &[Cli]) -> R<()> {
+    let clis = clis
+        .iter()
+        .map(|c| format!("\"{}\"", c.id()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let body = format!(
+        r#"# cli-switch setup selection.
+# Set by `cli-switch` -> `1) setup cli`.
+clis = [{clis}]
+"#
+    );
+    util::write_atomic(&paths::setup_config(), &body)
+}
+
 pub fn project_joined() -> bool {
     paths::project_config().exists()
 }

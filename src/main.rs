@@ -128,9 +128,22 @@ fn cmd_status() -> R<()> {
 pub(crate) fn print_status() -> R<()> {
     let cfg = config::load()?;
     let project_cfg = config::load_project()?;
+    let setup_clis = config::load_setup()?;
 
     println!("cli-switch {VERSION}");
     println!("store: {}", paths::store_root().display());
+    println!(
+        "setup CLIs: {}",
+        if setup_clis.is_empty() {
+            "not set".to_string()
+        } else {
+            setup_clis
+                .iter()
+                .map(|c| c.id())
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    );
     println!();
     println!("Global sync");
     println!(
