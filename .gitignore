@@ -1,3 +1,8 @@
 /target/
 **/*.rs.bk
 .DS_Store
+.agents/
+.claude/
+.kiro/
+AGENTS.md
+CLAUDE.md
