@@ -293,6 +293,7 @@ fn finish() -> util::R<()> {
         prune: false,
         quiet: false,
         dry_run: false,
+        migrate: false,
     })?;
 
     println!();

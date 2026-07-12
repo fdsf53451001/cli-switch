@@ -1,7 +1,7 @@
 name: release
 
 # Push a version tag to build cross-platform binaries and publish a release:
-#   git tag v0.1.0 && git push origin v0.1.0
+#   git tag v0.2.0 && git push origin v0.2.0
 on:
   push:
     tags: ["v*"]
@@ -11,8 +11,25 @@ permissions:
   contents: write # needed to create the GitHub Release and upload assets
 
 jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --all-targets
+
   build:
     name: ${{ matrix.target }}
+    needs: test
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -43,10 +60,17 @@ jobs:
           src="target/${{ matrix.target }}/release/cli-switch${ext}"
           dst="cli-switch-${{ matrix.target }}${ext}"
           cp "$src" "$dst"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$dst" > "$dst.sha256"
+          else
+            shasum -a 256 "$dst" > "$dst.sha256"
+          fi
           echo "ASSET=$dst" >> "$GITHUB_ENV"
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.ASSET }}
+          files: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
           generate_release_notes: true

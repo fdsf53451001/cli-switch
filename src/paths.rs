@@ -57,11 +57,14 @@ pub fn project_config() -> PathBuf {
 pub fn store_state_dir() -> PathBuf {
     store_root().join("state")
 }
-pub fn store_snapshot(cli: Cli) -> PathBuf {
-    store_state_dir().join(format!("{}.snapshot.json", cli.id()))
+pub fn state_v2() -> PathBuf {
+    store_state_dir().join("sync-state-v2.json")
 }
-pub fn store_backups() -> PathBuf {
-    store_root().join("backups")
+pub fn pending_conflicts() -> PathBuf {
+    store_state_dir().join("conflicts")
+}
+pub fn transactions() -> PathBuf {
+    store_state_dir().join("transactions")
 }
 pub fn shell_init() -> PathBuf {
     store_root().join("shell-init.sh")

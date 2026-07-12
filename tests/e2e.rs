@@ -1,0 +1,327 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+struct Sandbox {
+    root: PathBuf,
+    home: PathBuf,
+    store: PathBuf,
+    project: PathBuf,
+}
+
+impl Sandbox {
+    fn new(name: &str) -> Self {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("cli-switch-{name}-{}-{unique}", std::process::id()));
+        let home = root.join("home");
+        let store = root.join("store");
+        let project = root.join("project");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&store).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        Self {
+            root,
+            home,
+            store,
+            project,
+        }
+    }
+
+    fn command(&self, args: &[&str]) -> Output {
+        self.command_with_env(args, None)
+    }
+
+    fn command_with_env(&self, args: &[&str], extra: Option<(&str, &str)>) -> Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cli-switch"));
+        command
+            .args(args)
+            .env("HOME", &self.home)
+            .env("USERPROFILE", &self.home)
+            .env("CLI_SWITCH_HOME", &self.store)
+            .env("PATH", "")
+            .current_dir(&self.project);
+        if let Some((key, value)) = extra {
+            command.env(key, value);
+        }
+        command.output().unwrap()
+    }
+
+    fn configure(&self, features: &str) {
+        fs::write(
+            self.store.join("config.toml"),
+            format!("scope = \"global\"\nclis = [\"claude\", \"codex\"]\n[features]\n{features}\n"),
+        )
+        .unwrap();
+    }
+
+    fn install_two_clis(&self) {
+        fs::create_dir_all(self.home.join(".codex")).unwrap();
+        fs::write(
+            self.home.join(".claude.json"),
+            r#"{"mcpServers":{"alpha":{"command":"alpha","env":{"TOKEN":"one"}}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            self.home.join(".codex/config.toml"),
+            "[mcp_servers.beta]\ncommand = \"beta\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(self.home.join(".claude/skills/demo")).unwrap();
+        fs::create_dir_all(self.home.join(".codex/skills/demo")).unwrap();
+        fs::write(self.home.join(".claude/CLAUDE.md"), "shared instructions\n").unwrap();
+        fs::write(self.home.join(".codex/AGENTS.md"), "shared instructions\n").unwrap();
+        fs::write(self.home.join(".claude/skills/demo/SKILL.md"), "# demo\n").unwrap();
+        fs::write(self.home.join(".codex/skills/demo/SKILL.md"), "# demo\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for root in [".claude/skills/demo", ".codex/skills/demo"] {
+                let script = self.home.join(root).join("scripts/run.sh");
+                fs::create_dir_all(script.parent().unwrap()).unwrap();
+                fs::write(&script, "#!/bin/sh\necho ok\n").unwrap();
+                fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+    }
+}
+
+impl Drop for Sandbox {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+fn text(output: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+fn assert_same(path_a: impl AsRef<Path>, path_b: impl AsRef<Path>) {
+    assert_eq!(fs::read(path_a).unwrap(), fs::read(path_b).unwrap());
+}
+
+#[test]
+fn first_sync_is_transactional_and_second_sync_is_idempotent() {
+    let sandbox = Sandbox::new("initial");
+    sandbox.configure("mcp = true\nskills = true\ninstructions = true");
+    sandbox.install_two_clis();
+
+    let first = sandbox.command(&["sync"]);
+    assert!(first.status.success(), "{}", text(&first));
+    assert!(text(&first).contains("Transaction: tx-"));
+    let canonical = fs::read_to_string(sandbox.store.join("mcp.json")).unwrap();
+    assert!(canonical.contains("alpha") && canonical.contains("beta"));
+    assert_same(
+        sandbox.home.join(".claude/CLAUDE.md"),
+        sandbox.home.join(".codex/AGENTS.md"),
+    );
+    assert!(
+        !fs::symlink_metadata(sandbox.home.join(".claude/CLAUDE.md"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_same(
+        sandbox.home.join(".claude/skills/demo/SKILL.md"),
+        sandbox.home.join(".codex/skills/demo/SKILL.md"),
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(sandbox.home.join(".codex/skills/demo/scripts/run.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_ne!(mode & 0o111, 0);
+    }
+
+    let state_before = fs::read(sandbox.store.join("state/sync-state-v2.json")).unwrap();
+    let second = sandbox.command(&["sync"]);
+    assert!(second.status.success(), "{}", text(&second));
+    assert!(
+        text(&second).contains("Already in sync"),
+        "{}",
+        text(&second)
+    );
+    assert_eq!(
+        fs::read(sandbox.store.join("state/sync-state-v2.json")).unwrap(),
+        state_before
+    );
+}
+
+#[test]
+fn conflict_stops_all_writes_and_explicit_resolution_applies() {
+    let sandbox = Sandbox::new("conflict");
+    sandbox.configure("mcp = true\nskills = true\ninstructions = true");
+    sandbox.install_two_clis();
+    assert!(sandbox.command(&["sync"]).status.success());
+
+    fs::write(sandbox.home.join(".claude/CLAUDE.md"), "claude choice\n").unwrap();
+    fs::write(sandbox.home.join(".codex/AGENTS.md"), "codex choice\n").unwrap();
+    let canonical_before = fs::read(sandbox.store.join("AGENTS.md")).unwrap();
+    let conflict = sandbox.command(&["sync"]);
+    assert!(!conflict.status.success());
+    assert_eq!(conflict.status.code(), Some(2));
+    assert!(text(&conflict).contains("no files were changed"));
+    assert_eq!(
+        fs::read(sandbox.store.join("AGENTS.md")).unwrap(),
+        canonical_before
+    );
+
+    let listed = sandbox.command(&["conflicts", "list", "--json"]);
+    assert!(listed.status.success());
+    let records: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let id = records[0]["id"].as_str().unwrap();
+    let hook = sandbox.command(&["hook", "--json"]);
+    assert!(hook.status.success(), "{}", text(&hook));
+    let hook_packet: serde_json::Value = serde_json::from_slice(&hook.stdout).unwrap();
+    assert_eq!(hook_packet["requires_user"], true);
+    let shown =
+        String::from_utf8(sandbox.command(&["conflicts", "show", id, "--json"]).stdout).unwrap();
+    assert!(shown.contains("claude choice"));
+
+    let resolved = sandbox.command(&["conflicts", "resolve", id, "--source", "claude"]);
+    assert!(resolved.status.success(), "{}", text(&resolved));
+    let resolved_text = text(&resolved);
+    let transaction = resolved_text
+        .lines()
+        .find_map(|line| line.strip_prefix("Transaction: "))
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        fs::read_to_string(sandbox.store.join("AGENTS.md")).unwrap(),
+        "claude choice\n"
+    );
+    assert_eq!(
+        fs::read_to_string(sandbox.home.join(".codex/AGENTS.md")).unwrap(),
+        "claude choice\n"
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &sandbox.command(&["conflicts", "list", "--json"]).stdout
+        )
+        .unwrap(),
+        serde_json::json!([])
+    );
+
+    let rolled_back = sandbox.command(&["rollback", &transaction]);
+    assert!(rolled_back.status.success(), "{}", text(&rolled_back));
+    assert_eq!(
+        fs::read_to_string(sandbox.store.join("AGENTS.md")).unwrap(),
+        "shared instructions\n"
+    );
+    assert_eq!(
+        fs::read_to_string(sandbox.home.join(".claude/CLAUDE.md")).unwrap(),
+        "claude choice\n"
+    );
+    assert_eq!(
+        fs::read_to_string(sandbox.home.join(".codex/AGENTS.md")).unwrap(),
+        "codex choice\n"
+    );
+}
+
+#[test]
+fn dry_run_does_not_create_scaffold_state_or_targets() {
+    let sandbox = Sandbox::new("dry-run");
+    sandbox.configure("mcp = true\nskills = false\ninstructions = false");
+    sandbox.install_two_clis();
+    let before_claude = fs::read(sandbox.home.join(".claude.json")).unwrap();
+    let result = sandbox.command(&["sync", "--dry-run"]);
+    assert!(result.status.success(), "{}", text(&result));
+    assert_eq!(
+        fs::read(sandbox.home.join(".claude.json")).unwrap(),
+        before_claude
+    );
+    assert!(!sandbox.store.join("mcp.json").exists());
+    assert!(!sandbox.store.join("state").exists());
+}
+
+#[test]
+fn injected_apply_failure_rolls_every_managed_path_back() {
+    let sandbox = Sandbox::new("rollback-on-failure");
+    sandbox.configure("mcp = true\nskills = true\ninstructions = true");
+    sandbox.install_two_clis();
+    let claude_before = fs::read(sandbox.home.join(".claude.json")).unwrap();
+    let codex_before = fs::read(sandbox.home.join(".codex/config.toml")).unwrap();
+    let instructions_before = fs::read(sandbox.home.join(".claude/CLAUDE.md")).unwrap();
+
+    let failed = sandbox.command_with_env(&["sync"], Some(("CLI_SWITCH_TEST_FAIL_AFTER", "2")));
+    assert!(!failed.status.success());
+    assert!(text(&failed).contains("was rolled back"));
+    assert_eq!(
+        fs::read(sandbox.home.join(".claude.json")).unwrap(),
+        claude_before
+    );
+    assert_eq!(
+        fs::read(sandbox.home.join(".codex/config.toml")).unwrap(),
+        codex_before
+    );
+    assert_eq!(
+        fs::read(sandbox.home.join(".claude/CLAUDE.md")).unwrap(),
+        instructions_before
+    );
+    assert!(!sandbox.store.join("state/sync-state-v2.json").exists());
+}
+
+#[test]
+fn enabling_a_feature_later_does_not_silently_choose_canonical() {
+    let sandbox = Sandbox::new("feature-enable");
+    sandbox.configure("mcp = true\nskills = false\ninstructions = false");
+    sandbox.install_two_clis();
+    fs::write(sandbox.home.join(".claude/CLAUDE.md"), "claude only\n").unwrap();
+    fs::write(sandbox.home.join(".codex/AGENTS.md"), "codex only\n").unwrap();
+    assert!(sandbox.command(&["sync"]).status.success());
+
+    sandbox.configure("mcp = true\nskills = false\ninstructions = true");
+    let enabled = sandbox.command(&["sync"]);
+    assert_eq!(enabled.status.code(), Some(2), "{}", text(&enabled));
+    assert_eq!(
+        fs::read_to_string(sandbox.home.join(".claude/CLAUDE.md")).unwrap(),
+        "claude only\n"
+    );
+    assert_eq!(
+        fs::read_to_string(sandbox.home.join(".codex/AGENTS.md")).unwrap(),
+        "codex only\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn legacy_symlink_requires_explicit_migration() {
+    use std::os::unix::fs::symlink;
+    let sandbox = Sandbox::new("migration");
+    sandbox.configure("mcp = false\nskills = false\ninstructions = true");
+    sandbox.install_two_clis();
+    fs::write(sandbox.store.join("AGENTS.md"), "legacy canonical\n").unwrap();
+    fs::remove_file(sandbox.home.join(".claude/CLAUDE.md")).unwrap();
+    symlink(
+        sandbox.store.join("AGENTS.md"),
+        sandbox.home.join(".claude/CLAUDE.md"),
+    )
+    .unwrap();
+
+    let refused = sandbox.command(&["sync", "--quiet"]);
+    assert!(!refused.status.success());
+    assert!(fs::symlink_metadata(sandbox.home.join(".claude/CLAUDE.md"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+
+    fs::write(sandbox.home.join(".codex/AGENTS.md"), "legacy canonical\n").unwrap();
+    let migrated = sandbox.command(&["sync", "--migrate"]);
+    assert!(migrated.status.success(), "{}", text(&migrated));
+    assert!(
+        !fs::symlink_metadata(sandbox.home.join(".claude/CLAUDE.md"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}

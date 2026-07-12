@@ -19,6 +19,12 @@ pub enum Transport {
 pub struct McpServer {
     pub transport: Transport,
 
+    /// Native HTTP protocol vocabulary that cannot be represented everywhere.
+    /// Plain `http` is normalized to None; specialized values are preserved and
+    /// rejected when a destination cannot express them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_hint: Option<String>,
+
     // --- stdio fields ---
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
@@ -46,6 +52,7 @@ impl McpServer {
     pub fn stdio(command: impl Into<String>, args: Vec<String>) -> Self {
         McpServer {
             transport: Transport::Stdio,
+            protocol_hint: None,
             command: Some(command.into()),
             args,
             env: BTreeMap::new(),
@@ -58,6 +65,7 @@ impl McpServer {
     pub fn http(url: impl Into<String>) -> Self {
         McpServer {
             transport: Transport::Http,
+            protocol_hint: None,
             command: None,
             args: Vec::new(),
             env: BTreeMap::new(),
@@ -79,7 +87,8 @@ pub struct Canonical {
 }
 
 /// Which CLIs are known. Order here is the order sync visits them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Cli {
     Claude,
     Codex,

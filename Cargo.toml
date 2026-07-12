@@ -1,6 +1,6 @@
 [package]
 name = "cli-switch"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Sync MCP servers, skills, and instructions across AI CLIs (Claude Code, Codex, opencode, Kiro, Antigravity, GitHub Copilot)"
 repository = "https://github.com/fdsf53451001/cli-switch"

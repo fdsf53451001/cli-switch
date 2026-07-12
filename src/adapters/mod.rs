@@ -57,63 +57,70 @@ pub fn read_mcp(cli: Cli) -> R<McpMap> {
     }
     match cli {
         Cli::Codex => codex_read(&text),
-        Cli::Claude => json_read(&text, "mcpServers", claude_parse),
-        Cli::Opencode => json_read(&text, "mcp", opencode_parse),
-        Cli::Kiro => json_read(&text, "mcpServers", kiro_parse),
-        Cli::Antigravity => json_read(&text, "mcpServers", antigravity_parse),
-        Cli::Copilot => json_read(&text, "mcpServers", copilot_parse),
+        Cli::Claude => json_read_checked(&text, "mcpServers", claude_parse),
+        Cli::Opencode => json_read_checked(&text, "mcp", opencode_parse),
+        Cli::Kiro => json_read_checked(&text, "mcpServers", kiro_parse),
+        Cli::Antigravity => json_read_checked(&text, "mcpServers", antigravity_parse),
+        Cli::Copilot => json_read_checked(&text, "mcpServers", copilot_parse),
     }
     .map_err(|e| util::ctx(&path, e))
 }
 
-/// Upsert `servers` and delete `remove` in the CLI's native config.
-pub fn write_mcp(cli: Cli, servers: &McpMap, remove: &BTreeSet<String>) -> R<()> {
-    let path = paths::mcp_config(cli);
-    let existing = util::read_to_string_opt(&path)?;
-    let out = match cli {
-        Cli::Codex => codex_write(existing.as_deref(), servers, remove)?,
-        Cli::Claude => json_write(
-            existing.as_deref(),
-            "mcpServers",
-            servers,
-            remove,
-            claude_emit,
-            false,
-        )?,
-        Cli::Opencode => json_write(
-            existing.as_deref(),
-            "mcp",
-            servers,
-            remove,
-            opencode_emit,
-            false,
-        )?,
-        Cli::Kiro => json_write(
-            existing.as_deref(),
-            "mcpServers",
-            servers,
-            remove,
-            kiro_emit,
-            true,
-        )?,
+/// Render a native MCP config without touching disk. This is the planning seam
+/// used by the transactional synchronizer.
+pub fn render_mcp(
+    cli: Cli,
+    existing: Option<&str>,
+    servers: &McpMap,
+    remove: &BTreeSet<String>,
+) -> R<String> {
+    for (name, server) in servers {
+        validate_server(cli, name, server)?;
+    }
+    match cli {
+        Cli::Codex => codex_write(existing, servers, remove),
+        Cli::Claude => json_write(existing, "mcpServers", servers, remove, claude_emit, false),
+        Cli::Opencode => json_write(existing, "mcp", servers, remove, opencode_emit, false),
+        Cli::Kiro => json_write(existing, "mcpServers", servers, remove, kiro_emit, true),
         Cli::Antigravity => json_write(
-            existing.as_deref(),
+            existing,
             "mcpServers",
             servers,
             remove,
             antigravity_emit,
             true,
-        )?,
-        Cli::Copilot => json_write(
-            existing.as_deref(),
-            "mcpServers",
-            servers,
-            remove,
-            copilot_emit,
-            true,
-        )?,
-    };
-    util::write_atomic(&path, &out)
+        ),
+        Cli::Copilot => json_write(existing, "mcpServers", servers, remove, copilot_emit, true),
+    }
+}
+
+fn validate_server(cli: Cli, name: &str, server: &McpServer) -> R<()> {
+    match server.transport {
+        Transport::Stdio if server.command.as_deref().map(str::is_empty).unwrap_or(true) => {
+            return Err(format!(
+                "MCP server '{name}' has stdio transport but no command"
+            ));
+        }
+        Transport::Http if server.url.as_deref().map(str::is_empty).unwrap_or(true) => {
+            return Err(format!("MCP server '{name}' has HTTP transport but no URL"));
+        }
+        _ => {}
+    }
+    if !server.enabled && matches!(cli, Cli::Claude | Cli::Copilot) {
+        return Err(format!(
+            "{} cannot represent disabled MCP server '{name}'; refusing a lossy sync",
+            cli.id()
+        ));
+    }
+    if let Some(protocol) = &server.protocol_hint {
+        if !matches!(cli, Cli::Claude | Cli::Copilot) {
+            return Err(format!(
+                "{} cannot preserve MCP protocol '{protocol}' for server '{name}'; refusing a lossy sync",
+                cli.id()
+            ));
+        }
+    }
+    Ok(())
 }
 
 // ───────────────────────── JSON plumbing ─────────────────────────
@@ -133,6 +140,57 @@ fn json_read(text: &str, key: &str, parse: ParseFn) -> Result<McpMap, String> {
         }
     }
     Ok(out)
+}
+
+fn json_read_checked(text: &str, key: &str, parse: ParseFn) -> Result<McpMap, String> {
+    let root: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    if let Some(section) = root.get(key) {
+        let object = section
+            .as_object()
+            .ok_or_else(|| format!("{key} is not an object"))?;
+        for (name, entry) in object {
+            let Some(fields) = entry.as_object() else {
+                return Err(format!("MCP server '{name}' is not an object"));
+            };
+            for map_key in ["env", "environment", "headers"] {
+                if let Some(value) = fields.get(map_key) {
+                    let values = value.as_object().ok_or_else(|| {
+                        format!("MCP server '{name}' field '{map_key}' is not an object")
+                    })?;
+                    if values.values().any(|value| !value.is_string()) {
+                        return Err(format!(
+                            "MCP server '{name}' field '{map_key}' contains a non-string value"
+                        ));
+                    }
+                }
+            }
+            for array_key in ["args"] {
+                if let Some(value) = fields.get(array_key) {
+                    let values = value.as_array().ok_or_else(|| {
+                        format!("MCP server '{name}' field '{array_key}' is not an array")
+                    })?;
+                    if values.iter().any(|value| !value.is_string()) {
+                        return Err(format!(
+                            "MCP server '{name}' field '{array_key}' contains a non-string value"
+                        ));
+                    }
+                }
+            }
+            if let Some(value) = fields.get("command") {
+                let valid = value.is_string()
+                    || value
+                        .as_array()
+                        .map(|items| items.iter().all(Value::is_string))
+                        .unwrap_or(false);
+                if !valid {
+                    return Err(format!(
+                        "MCP server '{name}' field 'command' has an unsupported shape"
+                    ));
+                }
+            }
+        }
+    }
+    json_read(text, key, parse)
 }
 
 /// Upsert/remove servers under top-level `key`, preserving every other key.
@@ -158,12 +216,38 @@ fn json_write(
         .entry(key.to_string())
         .or_insert_with(|| Value::Object(Map::new()));
     if !section.is_object() {
-        *section = Value::Object(Map::new());
+        return Err(format!("{key} is not an object"));
     }
     let section = section.as_object_mut().unwrap();
 
+    const MANAGED: &[&str] = &[
+        "type",
+        "command",
+        "args",
+        "env",
+        "environment",
+        "url",
+        "serverUrl",
+        "headers",
+        "enabled",
+        "disabled",
+    ];
     for (name, srv) in servers {
-        section.insert(name.clone(), emit(srv));
+        let emitted = emit(srv);
+        let mut merged = section
+            .get(name)
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        for key in MANAGED {
+            merged.remove(*key);
+        }
+        if let Some(fields) = emitted.as_object() {
+            for (key, value) in fields {
+                merged.insert(key.clone(), value.clone());
+            }
+        }
+        section.insert(name.clone(), Value::Object(merged));
     }
     for name in remove {
         section.remove(name);
@@ -217,6 +301,9 @@ fn claude_parse(e: &Value) -> Option<McpServer> {
     if is_http {
         let url = e.get("url")?.as_str()?.to_string();
         let mut s = McpServer::http(url);
+        if !ty.is_empty() && ty != "http" {
+            s.protocol_hint = Some(ty.to_string());
+        }
         s.headers = value_to_str_map(e.get("headers"));
         Some(s)
     } else {
@@ -243,7 +330,10 @@ fn claude_emit(s: &McpServer) -> Value {
             }
         }
         Transport::Http => {
-            o.insert("type".into(), Value::String("http".into()));
+            o.insert(
+                "type".into(),
+                Value::String(s.protocol_hint.clone().unwrap_or_else(|| "http".into())),
+            );
             if let Some(u) = &s.url {
                 o.insert("url".into(), Value::String(u.clone()));
             }
@@ -417,6 +507,9 @@ fn copilot_parse(e: &Value) -> Option<McpServer> {
     if is_http {
         let url = e.get("url")?.as_str()?.to_string();
         let mut s = McpServer::http(url);
+        if !ty.is_empty() && ty != "http" {
+            s.protocol_hint = Some(ty.to_string());
+        }
         s.headers = value_to_str_map(e.get("headers"));
         Some(s)
     } else {
@@ -443,7 +536,10 @@ fn copilot_emit(s: &McpServer) -> Value {
             }
         }
         Transport::Http => {
-            o.insert("type".into(), Value::String("http".into()));
+            o.insert(
+                "type".into(),
+                Value::String(s.protocol_hint.clone().unwrap_or_else(|| "http".into())),
+            );
             if let Some(u) = &s.url {
                 o.insert("url".into(), Value::String(u.clone()));
             }
@@ -537,8 +633,16 @@ fn codex_write(
         it
     };
 
+    const MANAGED: &[&str] = &["command", "args", "env", "url", "http_headers", "enabled"];
     for (name, s) in servers {
-        let mut t = Table::new();
+        let mut t = root
+            .get(name)
+            .and_then(Item::as_table)
+            .cloned()
+            .unwrap_or_else(Table::new);
+        for key in MANAGED {
+            t.remove(key);
+        }
         match s.transport {
             Transport::Stdio => {
                 if let Some(c) = &s.command {
@@ -578,4 +682,142 @@ fn codex_write(
     }
 
     Ok(doc.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_map() -> McpMap {
+        let mut map = McpMap::new();
+        let mut local = McpServer::stdio("npx", vec!["-y".into(), "server".into()]);
+        local.env.insert("TOKEN".into(), "secret".into());
+        map.insert("local".into(), local);
+        let mut remote = McpServer::http("https://example.test/mcp");
+        remote
+            .headers
+            .insert("Authorization".into(), "Bearer secret".into());
+        map.insert("remote".into(), remote);
+        map
+    }
+
+    fn parse_rendered(cli: Cli, text: &str) -> McpMap {
+        match cli {
+            Cli::Codex => codex_read(text).unwrap(),
+            Cli::Claude => json_read(text, "mcpServers", claude_parse).unwrap(),
+            Cli::Opencode => json_read(text, "mcp", opencode_parse).unwrap(),
+            Cli::Kiro => json_read(text, "mcpServers", kiro_parse).unwrap(),
+            Cli::Antigravity => json_read(text, "mcpServers", antigravity_parse).unwrap(),
+            Cli::Copilot => json_read(text, "mcpServers", copilot_parse).unwrap(),
+        }
+    }
+
+    #[test]
+    fn all_adapters_round_trip_representable_fields() {
+        for cli in Cli::ALL {
+            let map = sample_map();
+            let rendered = render_mcp(cli, None, &map, &BTreeSet::new()).unwrap();
+            assert_eq!(parse_rendered(cli, &rendered), map, "{}", cli.id());
+        }
+    }
+
+    #[test]
+    fn json_adapters_preserve_unknown_server_fields() {
+        let cases = [
+            (Cli::Claude, "mcpServers"),
+            (Cli::Opencode, "mcp"),
+            (Cli::Kiro, "mcpServers"),
+            (Cli::Antigravity, "mcpServers"),
+            (Cli::Copilot, "mcpServers"),
+        ];
+        for (cli, key) in cases {
+            let existing = format!(
+                r#"{{"unrelated":true,"{key}":{{"local":{{"command":"old","tools":["x"],"oauth":{{"mode":"device"}}}}}}}}"#
+            );
+            let rendered =
+                render_mcp(cli, Some(&existing), &sample_map(), &BTreeSet::new()).unwrap();
+            let root: Value = serde_json::from_str(&rendered).unwrap();
+            let server = &root[key]["local"];
+            assert_eq!(server["tools"], serde_json::json!(["x"]), "{}", cli.id());
+            assert_eq!(server["oauth"]["mode"], "device", "{}", cli.id());
+            assert_eq!(root["unrelated"], true, "{}", cli.id());
+        }
+    }
+
+    #[test]
+    fn codex_preserves_unknown_server_fields_and_comments() {
+        let existing = "# keep me\n[mcp_servers.local]\ncommand = \"old\"\ntimeout_sec = 30\n";
+        let rendered =
+            render_mcp(Cli::Codex, Some(existing), &sample_map(), &BTreeSet::new()).unwrap();
+        assert!(rendered.contains("# keep me"));
+        assert!(rendered.contains("timeout_sec = 30"));
+        assert_eq!(codex_read(&rendered).unwrap(), sample_map());
+    }
+
+    #[test]
+    fn rejects_invalid_and_lossy_servers() {
+        let mut missing_command = McpMap::new();
+        let mut invalid = McpServer::stdio("", Vec::new());
+        invalid.command = None;
+        missing_command.insert("bad".into(), invalid);
+        assert!(render_mcp(Cli::Codex, None, &missing_command, &BTreeSet::new()).is_err());
+
+        let mut disabled = sample_map();
+        disabled.get_mut("local").unwrap().enabled = false;
+        assert!(render_mcp(Cli::Claude, None, &disabled, &BTreeSet::new())
+            .unwrap_err()
+            .contains("cannot represent disabled"));
+        assert!(render_mcp(Cli::Copilot, None, &disabled, &BTreeSet::new()).is_err());
+        assert!(render_mcp(Cli::Codex, None, &disabled, &BTreeSet::new()).is_ok());
+
+        let specialized = json_read(
+            r#"{"mcpServers":{"stream":{"type":"sse","url":"https://example.test/sse"}}}"#,
+            "mcpServers",
+            claude_parse,
+        )
+        .unwrap();
+        assert_eq!(specialized["stream"].protocol_hint.as_deref(), Some("sse"));
+        assert!(
+            render_mcp(Cli::Claude, None, &specialized, &BTreeSet::new())
+                .unwrap()
+                .contains("\"sse\"")
+        );
+        assert!(
+            render_mcp(Cli::Opencode, None, &specialized, &BTreeSet::new())
+                .unwrap_err()
+                .contains("cannot preserve MCP protocol")
+        );
+    }
+
+    #[test]
+    fn removal_only_removes_named_entries() {
+        let existing =
+            r#"{"mcpServers":{"remove":{"command":"x"},"keep":{"command":"y","tools":["z"]}}}"#;
+        let mut remove = BTreeSet::new();
+        remove.insert("remove".into());
+        let rendered = render_mcp(Cli::Copilot, Some(existing), &McpMap::new(), &remove).unwrap();
+        let root: Value = serde_json::from_str(&rendered).unwrap();
+        assert!(root["mcpServers"].get("remove").is_none());
+        assert_eq!(
+            root["mcpServers"]["keep"]["tools"],
+            serde_json::json!(["z"])
+        );
+    }
+
+    #[test]
+    fn malformed_native_fields_and_sections_fail_closed() {
+        let invalid_env = r#"{"mcpServers":{"bad":{"command":"x","env":{"PORT":1234}}}}"#;
+        assert!(json_read_checked(invalid_env, "mcpServers", claude_parse)
+            .unwrap_err()
+            .contains("non-string"));
+        let invalid_section = r#"{"mcpServers":[]}"#;
+        assert!(json_read_checked(invalid_section, "mcpServers", claude_parse).is_err());
+        assert!(render_mcp(
+            Cli::Claude,
+            Some(invalid_section),
+            &sample_map(),
+            &BTreeSet::new()
+        )
+        .is_err());
+    }
 }

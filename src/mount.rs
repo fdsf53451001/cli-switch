@@ -184,7 +184,7 @@ fn install_claude_hook(exe: &str) -> R<String> {
         "hooks": [{
             "type": "command",
             "command": exe,
-            "args": ["sync", "--quiet"],
+            "args": ["hook"],
             "timeout": 30
         }]
     }));
@@ -241,7 +241,7 @@ fn install_codex_hook(exe: &str) -> R<String> {
         "matcher": "startup|resume",
         "hooks": [{
             "type": "command",
-            "command": format!("{exe} sync --quiet"),
+            "command": format!("{exe} hook"),
             "statusMessage": "Syncing CLI config"
         }]
     }));
@@ -267,7 +267,7 @@ export default async ({{ $ }}) => {{
   let done = false;
   const run = async () => {{
     if (done) return; done = true;
-    try {{ await $`{exe} sync --quiet`; }} catch (e) {{ /* ignore */ }}
+    try {{ await $`{exe} hook`; }} catch (e) {{ /* ignore */ }}
   }};
   return {{
     event: async ({{ event }}) => {{
@@ -307,7 +307,7 @@ fn install_antigravity_hook(exe: &str) -> R<String> {
     });
 
     let command = format!(
-        "sh -c '{} sync --quiet >/dev/null 2>&1 || true; printf \"{{}}\"'",
+        "sh -c '{} hook --json || printf \"{{\\\"ok\\\":false}}\"'",
         shell_double_quote(exe)
     );
     obj.insert(
@@ -334,8 +334,8 @@ fn install_antigravity_hook(exe: &str) -> R<String> {
 
 fn install_copilot_hook(exe: &str) -> R<String> {
     let path = paths::copilot_hook();
-    let bash = format!("{} sync --quiet", shell_double_quote(exe));
-    let pwsh = format!("& {} sync --quiet", shell_double_quote(exe));
+    let bash = format!("{} hook", shell_double_quote(exe));
+    let pwsh = format!("& {} hook", shell_double_quote(exe));
     let root = json!({
         "version": 1,
         "hooks": {
@@ -428,13 +428,17 @@ fn inject_kiro_agent_hook(path: &std::path::Path, exe: &str) -> R<String> {
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    entries.retain(|e| !kiro_hook_mentions(e, "cli-switch") && !kiro_hook_mentions(e, "agent-sync"));
-    entries.push(json!({ "command": format!("{exe} sync --quiet") }));
+    entries
+        .retain(|e| !kiro_hook_mentions(e, "cli-switch") && !kiro_hook_mentions(e, "agent-sync"));
+    entries.push(json!({ "command": format!("{exe} hook") }));
     hooks.insert("agentSpawn".into(), Value::Array(entries));
 
     let out = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
     util::write_atomic(path, &out)?;
-    Ok(format!("kiro: agentSpawn hook injected -> {}", path.display()))
+    Ok(format!(
+        "kiro: agentSpawn hook injected -> {}",
+        path.display()
+    ))
 }
 
 fn kiro_hook_mentions(entry: &Value, needle: &str) -> bool {
@@ -493,7 +497,7 @@ fn write_shell_init(exe: &str) -> R<String> {
         r#"# cli-switch shell init — source this from ~/.zshrc or ~/.bashrc:
 #   source "{path}"
 # Wraps Kiro terminal launches so config syncs first.
-__cli_switch_run() {{ command "{exe}" sync --quiet >/dev/null 2>&1 || true; }}
+__cli_switch_run() {{ command "{exe}" hook || true; }}
 kiro()        {{ __cli_switch_run; command kiro "$@"; }}
 "#,
         path = path.display(),
