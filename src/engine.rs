@@ -1174,7 +1174,31 @@ fn read_skills(root: &Path) -> R<BTreeMap<String, Tree>> {
 }
 
 fn read_tree(root: &Path) -> R<Tree> {
-    fn walk(root: &Path, dir: &Path, out: &mut Tree) -> R<()> {
+    fn insert_file(root: &Path, path: &Path, source: &Path, out: &mut Tree) -> R<()> {
+        let meta = fs::metadata(source).map_err(|e| util::ctx(source, e))?;
+        let rel = path
+            .strip_prefix(root)
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        #[cfg(unix)]
+        let executable = {
+            use std::os::unix::fs::PermissionsExt;
+            meta.permissions().mode() & 0o111 != 0
+        };
+        #[cfg(not(unix))]
+        let executable = false;
+        out.insert(
+            rel,
+            FileBlob {
+                data: fs::read(source).map_err(|e| util::ctx(source, e))?,
+                executable,
+            },
+        );
+        Ok(())
+    }
+
+    fn walk(root: &Path, canonical_root: &Path, dir: &Path, out: &mut Tree) -> R<()> {
         let mut entries = fs::read_dir(dir)
             .map_err(|e| util::ctx(dir, e))?
             .collect::<Result<Vec<_>, _>>()
@@ -1184,39 +1208,34 @@ fn read_tree(root: &Path) -> R<Tree> {
             let path = entry.path();
             let meta = fs::symlink_metadata(&path).map_err(|e| util::ctx(&path, e))?;
             if meta.file_type().is_symlink() {
-                return Err(format!(
-                    "nested symlink is not supported in skill {}",
-                    path.display()
-                ));
-            }
-            if meta.is_dir() {
-                walk(root, &path, out)?;
+                let target = fs::canonicalize(&path).map_err(|e| util::ctx(&path, e))?;
+                if !target.starts_with(canonical_root) {
+                    return Err(format!(
+                        "nested symlink escapes skill directory: {} -> {}",
+                        path.display(),
+                        target.display()
+                    ));
+                }
+                if !target.is_file() {
+                    return Err(format!(
+                        "nested directory symlink is not supported in skill {}",
+                        path.display()
+                    ));
+                }
+                // Materialize internal file links as regular files. This keeps
+                // skills portable across CLIs and avoids recreating link cycles.
+                insert_file(root, &path, &target, out)?;
+            } else if meta.is_dir() {
+                walk(root, canonical_root, &path, out)?;
             } else if meta.is_file() {
-                let rel = path
-                    .strip_prefix(root)
-                    .map_err(|e| e.to_string())?
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                #[cfg(unix)]
-                let executable = {
-                    use std::os::unix::fs::PermissionsExt;
-                    meta.permissions().mode() & 0o111 != 0
-                };
-                #[cfg(not(unix))]
-                let executable = false;
-                out.insert(
-                    rel,
-                    FileBlob {
-                        data: fs::read(&path).map_err(|e| util::ctx(&path, e))?,
-                        executable,
-                    },
-                );
+                insert_file(root, &path, &path, out)?;
             }
         }
         Ok(())
     }
     let mut out = Tree::new();
-    walk(root, root, &mut out)?;
+    let canonical_root = fs::canonicalize(root).map_err(|e| util::ctx(root, e))?;
+    walk(root, &canonical_root, root, &mut out)?;
     Ok(out)
 }
 
@@ -1793,6 +1812,53 @@ fn transaction_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn skill_tree_materializes_internal_file_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "cli-switch-symlink-test-{}-{}",
+            std::process::id(),
+            util::now_millis()
+        ));
+        fs::create_dir_all(root.join("plugins/demo")).unwrap();
+        fs::write(root.join("SKILL.md"), b"# demo\n").unwrap();
+        symlink("../../SKILL.md", root.join("plugins/demo/SKILL.md")).unwrap();
+
+        let tree = read_tree(&root).unwrap();
+        assert_eq!(tree["SKILL.md"].data, b"# demo\n");
+        assert_eq!(tree["plugins/demo/SKILL.md"].data, b"# demo\n");
+        assert!(fs::symlink_metadata(root.join("plugins/demo/SKILL.md"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skill_tree_rejects_symlinks_that_escape_the_skill() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!(
+            "cli-switch-escape-test-{}-{}",
+            std::process::id(),
+            util::now_millis()
+        ));
+        let root = base.join("skill");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("SKILL.md"), b"# demo\n").unwrap();
+        fs::write(base.join("secret"), b"outside\n").unwrap();
+        symlink("../secret", root.join("outside")).unwrap();
+
+        let error = read_tree(&root).unwrap_err();
+        assert!(error.contains("escapes skill directory"), "{error}");
+
+        fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn simultaneous_different_values_conflict() {
