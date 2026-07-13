@@ -6,27 +6,20 @@
 # download fails, or you set CLI_SWITCH_FROM_SOURCE=1) it builds from source.
 #
 # Overrides:
-#   CLI_SWITCH_REPO=owner/repo     which repo's releases to pull from
 #   CLI_SWITCH_VERSION=v0.2.0      a specific tag (default: latest)
 #   CLI_SWITCH_BIN_DIR=~/.local/bin  install location
 #   CLI_SWITCH_FROM_SOURCE=1       force building from source
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="${CLI_SWITCH_BIN_DIR:-$HOME/.local/bin}"
-REPO="${CLI_SWITCH_REPO:-fdsf53451001/cli-switch}"
+REPO="fdsf53451001/cli-switch"
+REPO_URL="https://github.com/$REPO.git"
 VERSION="${CLI_SWITCH_VERSION:-latest}"
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
 info() { echo -e "${GREEN}[+]${NC} $*"; }
 warn() { echo -e "${YELLOW}[!]${NC} $*"; }
 err()  { echo -e "${RED}[x]${NC} $*"; }
-
-# When run inside a clone, prefer the repo's own origin for the release slug.
-if remote=$(git -C "$ROOT" remote get-url origin 2>/dev/null); then
-  slug=$(printf '%s' "$remote" | sed -E 's#^(git@github\.com:|https://github\.com/)##; s#\.git$##')
-  case "$slug" in */*) REPO="$slug" ;; esac
-fi
 
 # Map this machine to a release target triple (empty = build from source).
 target=""
@@ -42,15 +35,30 @@ case "$(uname -s)" in
     esac ;;
 esac
 
-build_from_source() {
+build_from_source() (
+  local source_dir
   command -v cargo >/dev/null 2>&1 || {
     err "需要 cargo（Rust）才能從原始碼編譯。安裝：https://rustup.rs"; exit 1;
   }
+  command -v git >/dev/null 2>&1 || {
+    err "需要 git 才能取得原始碼。"; exit 1;
+  }
+
+  source_dir="$(mktemp -d)"
+  trap 'rm -rf "$source_dir"' EXIT
+
+  info "取得原始碼：$REPO_URL"
+  if [ "$VERSION" = "latest" ]; then
+    git clone --depth 1 "$REPO_URL" "$source_dir"
+  else
+    git clone --depth 1 --branch "$VERSION" "$REPO_URL" "$source_dir"
+  fi
+
   info "從原始碼編譯 release binary…"
-  ( cd "$ROOT" && cargo build --release )
+  ( cd "$source_dir" && cargo build --release )
   mkdir -p "$BIN_DIR"
-  install -m755 "$ROOT/target/release/cli-switch" "$BIN_DIR/cli-switch"
-}
+  install -m755 "$source_dir/target/release/cli-switch" "$BIN_DIR/cli-switch"
+)
 
 download_prebuilt() {
   local triple="$1" url tmp
