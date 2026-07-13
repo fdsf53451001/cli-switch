@@ -7,7 +7,7 @@
 #
 # Overrides:
 #   CLI_SWITCH_REPO=owner/repo     which repo's releases to pull from
-#   CLI_SWITCH_VERSION=v0.1.0      a specific tag (default: latest)
+#   CLI_SWITCH_VERSION=v0.2.0      a specific tag (default: latest)
 #   CLI_SWITCH_BIN_DIR=~/.local/bin  install location
 #   CLI_SWITCH_FROM_SOURCE=1       force building from source
 set -euo pipefail

@@ -34,6 +34,10 @@ pub struct Config {
     pub mcp: bool,
     pub skills: bool,
     pub instructions: bool,
+    /// Synchronize custom agent definitions. This is deliberately opt-in:
+    /// older config files do not acquire a new class of managed files merely
+    /// by upgrading cli-switch.
+    pub agents: bool,
 }
 
 impl Default for Config {
@@ -44,6 +48,7 @@ impl Default for Config {
             mcp: true,
             skills: true,
             instructions: true,
+            agents: false,
         }
     }
 }
@@ -134,6 +139,7 @@ fn load_from(path: &std::path::Path, default_scope: Scope) -> R<Config> {
         cfg.mcp = b("mcp", cfg.mcp);
         cfg.skills = b("skills", cfg.skills);
         cfg.instructions = b("instructions", cfg.instructions);
+        cfg.agents = b("agents", cfg.agents);
     }
     Ok(cfg)
 }
@@ -153,6 +159,7 @@ fn disabled_global() -> Config {
         mcp: true,
         skills: true,
         instructions: true,
+        agents: false,
     }
 }
 
@@ -192,12 +199,14 @@ clis = [{}]
 mcp = {}
 skills = {}
 instructions = {}
+agents = {}
 "#,
         cfg.scope.id(),
         clis,
         cfg.mcp,
         cfg.skills,
-        cfg.instructions
+        cfg.instructions,
+        cfg.agents
     );
     util::write_atomic(path, &body)
 }

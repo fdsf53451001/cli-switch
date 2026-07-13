@@ -108,6 +108,82 @@ fn assert_same(path_a: impl AsRef<Path>, path_b: impl AsRef<Path>) {
     assert_eq!(fs::read(path_a).unwrap(), fs::read(path_b).unwrap());
 }
 
+fn claude_agent(id: &str, prompt: &str) -> String {
+    format!("---\nname: {id}\ndescription: Reviews changes\n---\n\n{prompt}\n")
+}
+
+#[test]
+fn custom_agent_import_fanout_delete_and_rollback_are_transactional() {
+    let sandbox = Sandbox::new("agents-global");
+    sandbox.configure("mcp = false\nskills = false\ninstructions = false\nagents = true");
+    sandbox.install_two_clis();
+    fs::create_dir_all(sandbox.home.join(".claude/agents")).unwrap();
+    fs::write(
+        sandbox.home.join(".claude/agents/reviewer.md"),
+        claude_agent("reviewer", "Review carefully."),
+    )
+    .unwrap();
+
+    let imported = sandbox.command(&["sync"]);
+    assert!(imported.status.success(), "{}", text(&imported));
+    assert!(sandbox.store.join("agents/reviewer/agent.toml").is_file());
+    assert!(sandbox.store.join("agents/reviewer/prompt.md").is_file());
+    let codex = sandbox.home.join(".codex/agents/reviewer.toml");
+    assert!(codex.is_file());
+    assert!(fs::read_to_string(&codex)
+        .unwrap()
+        .contains("developer_instructions = \"Review carefully.\""));
+    let second = sandbox.command(&["sync"]);
+    assert!(second.status.success(), "{}", text(&second));
+    assert!(text(&second).contains("Already in sync"));
+
+    fs::remove_file(sandbox.home.join(".claude/agents/reviewer.md")).unwrap();
+    let deleted = sandbox.command(&["sync"]);
+    assert!(deleted.status.success(), "{}", text(&deleted));
+    let transaction = text(&deleted)
+        .lines()
+        .find_map(|line| line.strip_prefix("Transaction: "))
+        .unwrap()
+        .to_string();
+    assert!(!sandbox.store.join("agents/reviewer").exists());
+    assert!(!codex.exists());
+
+    let rollback = sandbox.command(&["rollback", &transaction]);
+    assert!(rollback.status.success(), "{}", text(&rollback));
+    assert!(sandbox.store.join("agents/reviewer/agent.toml").is_file());
+    assert!(codex.is_file());
+}
+
+#[test]
+fn project_agents_use_independent_canonical_and_native_paths() {
+    let sandbox = Sandbox::new("agents-project");
+    sandbox.install_two_clis();
+    fs::create_dir_all(sandbox.project.join(".cli-switch")).unwrap();
+    fs::write(
+        sandbox.project.join(".cli-switch/config.toml"),
+        "scope = \"project\"\nclis = [\"claude\", \"codex\"]\n[features]\nmcp = false\nskills = false\ninstructions = false\nagents = true\n",
+    )
+    .unwrap();
+    fs::create_dir_all(sandbox.project.join(".claude/agents")).unwrap();
+    fs::write(
+        sandbox.project.join(".claude/agents/project-reviewer.md"),
+        claude_agent("project-reviewer", "Review only this project."),
+    )
+    .unwrap();
+
+    let result = sandbox.command(&["sync"]);
+    assert!(result.status.success(), "{}", text(&result));
+    assert!(sandbox
+        .project
+        .join(".cli-switch/agents/project-reviewer/agent.toml")
+        .is_file());
+    assert!(sandbox
+        .project
+        .join(".codex/agents/project-reviewer.toml")
+        .is_file());
+    assert!(!sandbox.store.join("agents/project-reviewer").exists());
+}
+
 #[test]
 fn first_sync_is_transactional_and_second_sync_is_idempotent() {
     let sandbox = Sandbox::new("initial");

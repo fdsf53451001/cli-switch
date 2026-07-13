@@ -2,7 +2,7 @@
 name = "cli-switch"
 version = "0.2.0"
 edition = "2021"
-description = "Sync MCP servers, skills, and instructions across AI CLIs (Claude Code, Codex, opencode, Kiro, Antigravity, GitHub Copilot)"
+description = "Sync MCP servers, skills, instructions, and custom agents across AI CLIs"
 repository = "https://github.com/fdsf53451001/cli-switch"
 readme = "README.md"
 license = "MIT"

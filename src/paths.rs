@@ -39,6 +39,10 @@ pub fn store_skills() -> PathBuf {
 pub fn store_instructions() -> PathBuf {
     store_root().join("AGENTS.md")
 }
+/// Canonical global custom-agent bundles.
+pub fn store_agents() -> PathBuf {
+    store_root().join("agents")
+}
 pub fn store_config() -> PathBuf {
     store_root().join("config.toml")
 }
@@ -53,6 +57,10 @@ pub fn project_config_dir() -> PathBuf {
 }
 pub fn project_config() -> PathBuf {
     project_config_dir().join("config.toml")
+}
+/// Canonical project custom-agent bundles.
+pub fn project_agents() -> PathBuf {
+    project_config_dir().join("agents")
 }
 pub fn store_state_dir() -> PathBuf {
     store_root().join("state")
@@ -96,6 +104,58 @@ pub fn skills_dir(cli: Cli) -> PathBuf {
         Cli::Kiro => h.join(".kiro").join("skills"),
         Cli::Antigravity => h.join(".gemini").join("antigravity-cli").join("skills"),
         Cli::Copilot => h.join(".copilot").join("skills"),
+    }
+}
+
+/// The global directory a CLI scans for custom agent definitions.
+///
+/// Antigravity calls this directory `{appDataDir}/agents`. Unlike its project
+/// path, the global path is not documented publicly; we infer appDataDir as
+/// `~/.gemini/antigravity-cli` from the current binary/config layout and keep
+/// that assumption isolated in this function.
+pub fn agents_dir(cli: Cli) -> PathBuf {
+    let h = home();
+    match cli {
+        Cli::Claude => h.join(".claude").join("agents"),
+        Cli::Codex => h.join(".codex").join("agents"),
+        Cli::Opencode => {
+            let base = h.join(".config").join("opencode");
+            let current = base.join("agents");
+            let legacy = base.join("agent");
+            // OpenCode 1.17.x still loads the old singular directory. Keep an
+            // existing installation in place; new setups use the documented
+            // plural path.
+            if current.exists() || !legacy.exists() {
+                current
+            } else {
+                legacy
+            }
+        }
+        Cli::Kiro => h.join(".kiro").join("agents"),
+        Cli::Antigravity => h.join(".gemini").join("antigravity-cli").join("agents"),
+        Cli::Copilot => h.join(".copilot").join("agents"),
+    }
+}
+
+/// The project directory a CLI scans for custom agent definitions.
+pub fn project_agents_dir(cli: Cli) -> PathBuf {
+    let root = project_root();
+    match cli {
+        Cli::Claude => root.join(".claude").join("agents"),
+        Cli::Codex => root.join(".codex").join("agents"),
+        Cli::Opencode => {
+            let base = root.join(".opencode");
+            let current = base.join("agents");
+            let legacy = base.join("agent");
+            if current.exists() || !legacy.exists() {
+                current
+            } else {
+                legacy
+            }
+        }
+        Cli::Kiro => root.join(".kiro").join("agents"),
+        Cli::Antigravity => root.join(".agents").join("agents"),
+        Cli::Copilot => root.join(".github").join("agents"),
     }
 }
 

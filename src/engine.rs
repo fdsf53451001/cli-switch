@@ -3,6 +3,7 @@
 //! Every source is compared with the last successful snapshot. A sync either
 //! produces one deterministic plan and commits all of it, or writes nothing.
 
+use crate::agents::{AgentDefinition, AgentRole, CapabilityPolicy, ModelIntent, NativeAgentFormat};
 use crate::model::{Canonical, Cli, McpMap, McpServer};
 use crate::util::{self, R};
 use crate::{adapters, paths, store};
@@ -29,6 +30,8 @@ pub struct ContentSnapshot {
     pub instructions: Option<Vec<u8>>,
     #[serde(default)]
     pub skills: BTreeMap<String, Tree>,
+    #[serde(default)]
+    pub agents: BTreeMap<String, AgentDefinition>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -39,6 +42,8 @@ pub struct EndpointSnapshot {
     pub instructions_initialized: bool,
     #[serde(default)]
     pub skills_initialized: bool,
+    #[serde(default)]
+    pub agents_initialized: bool,
     #[serde(flatten)]
     pub content: ContentSnapshot,
 }
@@ -55,6 +60,24 @@ pub struct SyncState {
     pub last_transaction: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct AgentScopeEndpoint {
+    #[serde(default)]
+    initialized: bool,
+    #[serde(default)]
+    agents: BTreeMap<String, AgentDefinition>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct AgentScopeState {
+    #[serde(default)]
+    version: u8,
+    #[serde(default)]
+    canonical: AgentScopeEndpoint,
+    #[serde(default)]
+    endpoints: BTreeMap<Cli, AgentScopeEndpoint>,
+}
+
 fn state_version() -> u8 {
     2
 }
@@ -65,6 +88,7 @@ pub enum UnitValue {
     Mcp(Option<McpServer>),
     Instructions(Option<Vec<u8>>),
     Skill(Option<Tree>),
+    Agent(Option<AgentDefinition>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,18 +162,196 @@ pub fn last_transaction() -> R<Option<String>> {
     Ok(load_state()?.last_transaction)
 }
 
+/// Project agents have an independent snapshot so the same ID at global and
+/// project scope is never merged. Writes still use the common transaction
+/// journal, so `cli-switch rollback` covers them.
+pub fn run_project_agents(active: &[Cli], opts: &Options) -> R<Outcome> {
+    let state_path = paths::project_config_dir().join("agent-sync-state-v1.json");
+    let state: AgentScopeState = match util::read_to_string_opt(&state_path)? {
+        Some(text) if !text.trim().is_empty() => {
+            serde_json::from_str(&text).map_err(|e| util::ctx(&state_path, e))?
+        }
+        _ => AgentScopeState::default(),
+    };
+    let canonical_now = read_canonical_agents(&paths::project_agents())?;
+    let mut endpoint_now = BTreeMap::new();
+    for &cli in active {
+        let mut current = read_native_agents(cli, &paths::project_agents_dir(cli))?;
+        inherit_other_agent_extensions(
+            &mut current,
+            state.endpoints.get(&cli).map(|s| &s.agents),
+            agent_format(cli).namespace(),
+        );
+        endpoint_now.insert(cli, current);
+    }
+    let scan_hash = util::fingerprint(
+        &serde_json::to_vec(&(&canonical_now, &endpoint_now)).map_err(|e| e.to_string())?,
+    );
+    let resolutions = load_resolutions()?;
+    let mut desired = canonical_now.clone();
+    let mut names = BTreeSet::new();
+    names.extend(canonical_now.keys().cloned());
+    names.extend(state.canonical.agents.keys().cloned());
+    for agents in endpoint_now.values() {
+        names.extend(agents.keys().cloned());
+    }
+    for endpoint in state.endpoints.values() {
+        names.extend(endpoint.agents.keys().cloned());
+    }
+    let mut conflicts = Vec::new();
+    for name in names {
+        let sources = active
+            .iter()
+            .map(|cli| {
+                let endpoint = state.endpoints.get(cli);
+                (
+                    cli.id().to_string(),
+                    UnitValue::Agent(endpoint_now.get(cli).and_then(|m| m.get(&name)).cloned()),
+                    UnitValue::Agent(endpoint.and_then(|e| e.agents.get(&name)).cloned()),
+                    endpoint.map(|e| e.initialized).unwrap_or(false),
+                )
+            })
+            .collect();
+        match decide(
+            ("project-agent", &name),
+            UnitValue::Agent(canonical_now.get(&name).cloned()),
+            UnitValue::Agent(state.canonical.agents.get(&name).cloned()),
+            state.canonical.initialized,
+            sources,
+            &scan_hash,
+            &resolutions,
+        )? {
+            Decision::Value(UnitValue::Agent(Some(agent))) => {
+                desired.insert(name, agent);
+            }
+            Decision::Value(UnitValue::Agent(None)) => {
+                desired.remove(&name);
+            }
+            Decision::Conflict(conflict) => conflicts.push(conflict),
+            _ => unreachable!(),
+        }
+    }
+    let project_skills = read_skills(&paths::project_root().join(".agents").join("skills"))?;
+    let global_mcp = store::load_canonical()?.servers;
+    validate_agents(&desired, &project_skills, &global_mcp)?;
+    if !conflicts.is_empty() {
+        if !opts.dry_run {
+            save_conflicts(&conflicts)?;
+        }
+        return Ok(Outcome {
+            transaction: None,
+            actions: Vec::new(),
+            conflicts,
+            migration_required: false,
+        });
+    }
+
+    let mut operations = Vec::new();
+    for name in union_keys(&canonical_now, &desired) {
+        operations.push(Operation {
+            path: paths::project_agents().join(&name),
+            after: desired
+                .get(&name)
+                .map(canonical_agent_tree)
+                .transpose()?
+                .map(Node::Dir)
+                .unwrap_or(Node::Absent),
+            label: format!("project canonical agent {name}"),
+        });
+    }
+    for &cli in active {
+        let current = endpoint_now.get(&cli).cloned().unwrap_or_default();
+        let format = agent_format(cli);
+        for name in union_keys(&current, &desired) {
+            if format.is_reserved(&name) {
+                continue;
+            }
+            operations.push(Operation {
+                path: native_agent_path(cli, &paths::project_agents_dir(cli), &name),
+                after: desired
+                    .get(&name)
+                    .map(|agent| format.render(agent).map(|s| Node::File(s.into_bytes())))
+                    .transpose()?
+                    .unwrap_or(Node::Absent),
+                label: format!("project {} agent {name}", cli.id()),
+            });
+        }
+    }
+    let next_state = AgentScopeState {
+        version: 1,
+        canonical: AgentScopeEndpoint {
+            initialized: true,
+            agents: desired.clone(),
+        },
+        endpoints: active
+            .iter()
+            .map(|cli| {
+                (
+                    *cli,
+                    AgentScopeEndpoint {
+                        initialized: true,
+                        agents: desired.clone(),
+                    },
+                )
+            })
+            .collect(),
+    };
+    operations.push(Operation {
+        path: state_path,
+        after: Node::File(serde_json::to_vec_pretty(&next_state).map_err(|e| e.to_string())?),
+        label: "project agent state snapshot".into(),
+    });
+    let actions = operations
+        .iter()
+        .filter(|op| read_node(&op.path).ok().as_ref() != Some(&op.after))
+        .map(|op| op.label.clone())
+        .collect::<Vec<_>>();
+    if opts.dry_run || actions.is_empty() {
+        return Ok(Outcome {
+            transaction: None,
+            actions,
+            conflicts: Vec::new(),
+            migration_required: false,
+        });
+    }
+    let id = transaction_id();
+    apply_transaction_with_id(&operations, &id)?;
+    clear_resolved_conflicts()?;
+    retain_transactions(10)?;
+    Ok(Outcome {
+        transaction: Some(id),
+        actions,
+        conflicts: Vec::new(),
+        migration_required: false,
+    })
+}
+
 pub fn run(
     active: &[Cli],
     mcp: bool,
     instructions: bool,
     skills: bool,
+    agents: bool,
     opts: &Options,
 ) -> R<Outcome> {
     let state = load_state()?;
-    let canonical_now = read_canonical()?;
+    let mut canonical_now = read_canonical(agents)?;
+    if !agents {
+        canonical_now.agents = state.canonical.content.agents.clone();
+    }
     let mut endpoint_now = BTreeMap::new();
     for &cli in active {
-        endpoint_now.insert(cli, read_endpoint(cli)?);
+        let mut current = read_endpoint(cli, agents)?;
+        if agents {
+            inherit_other_agent_extensions(
+                &mut current.agents,
+                state.endpoints.get(&cli).map(|s| &s.content.agents),
+                agent_format(cli).namespace(),
+            );
+        } else if let Some(previous) = state.endpoints.get(&cli) {
+            current.agents = previous.content.agents.clone();
+        }
+        endpoint_now.insert(cli, current);
     }
 
     let legacy = detect_legacy(active, instructions, skills);
@@ -307,6 +509,56 @@ pub fn run(
         }
     }
 
+    if agents {
+        let names = all_agent_names(&state, &canonical_now, &endpoint_now);
+        for name in names {
+            let sources = active
+                .iter()
+                .map(|cli| {
+                    let current = endpoint_now
+                        .get(cli)
+                        .and_then(|c| c.agents.get(&name))
+                        .cloned();
+                    let base_state = state.endpoints.get(cli);
+                    let base = base_state
+                        .and_then(|s| s.content.agents.get(&name))
+                        .cloned();
+                    (
+                        *cli,
+                        current,
+                        base,
+                        base_state.map(|s| s.agents_initialized).unwrap_or(false),
+                    )
+                })
+                .collect::<Vec<_>>();
+            match decide(
+                ("agent", &name),
+                UnitValue::Agent(canonical_now.agents.get(&name).cloned()),
+                UnitValue::Agent(state.canonical.content.agents.get(&name).cloned()),
+                state.canonical.agents_initialized,
+                sources
+                    .into_iter()
+                    .map(|(c, n, b, i)| {
+                        (c.id().into(), UnitValue::Agent(n), UnitValue::Agent(b), i)
+                    })
+                    .collect(),
+                &scan_hash,
+                &resolutions,
+            )? {
+                Decision::Value(UnitValue::Agent(Some(agent))) => {
+                    desired.agents.insert(name, agent);
+                }
+                // Agent deletion is intentionally snapshot-based, not --prune based.
+                Decision::Value(UnitValue::Agent(None)) => {
+                    desired.agents.remove(&name);
+                }
+                Decision::Conflict(c) => conflicts.push(c),
+                _ => unreachable!(),
+            }
+        }
+        validate_agents(&desired.agents, &desired.skills, &desired.mcp)?;
+    }
+
     if !conflicts.is_empty() {
         if !opts.dry_run {
             save_conflicts(&conflicts)?;
@@ -327,6 +579,7 @@ pub fn run(
         mcp,
         instructions,
         skills,
+        agents,
     )?;
     let mut next_state = state;
     next_state.version = 2;
@@ -334,7 +587,8 @@ pub fn run(
         mcp_initialized: next_state.canonical.mcp_initialized || mcp,
         instructions_initialized: next_state.canonical.instructions_initialized || instructions,
         skills_initialized: next_state.canonical.skills_initialized || skills,
-        content: merged_snapshot(&canonical_now, &desired, mcp, instructions, skills),
+        agents_initialized: next_state.canonical.agents_initialized || agents,
+        content: merged_snapshot(&canonical_now, &desired, mcp, instructions, skills, agents),
     };
     for &cli in active {
         let current = endpoint_now.get(&cli).cloned().unwrap_or_default();
@@ -345,7 +599,8 @@ pub fn run(
                 mcp_initialized: previous.mcp_initialized || mcp,
                 instructions_initialized: previous.instructions_initialized || instructions,
                 skills_initialized: previous.skills_initialized || skills,
-                content: merged_snapshot(&current, &desired, mcp, instructions, skills),
+                agents_initialized: previous.agents_initialized || agents,
+                content: merged_snapshot(&current, &desired, mcp, instructions, skills, agents),
             },
         );
     }
@@ -398,6 +653,7 @@ fn merged_snapshot(
     mcp: bool,
     instructions: bool,
     skills: bool,
+    agents: bool,
 ) -> ContentSnapshot {
     ContentSnapshot {
         mcp: if mcp {
@@ -414,6 +670,11 @@ fn merged_snapshot(
             desired.skills.clone()
         } else {
             current.skills.clone()
+        },
+        agents: if agents {
+            desired.agents.clone()
+        } else {
+            current.agents.clone()
         },
     }
 }
@@ -447,6 +708,7 @@ fn decide(
             changed.push(Candidate { source, value: now });
         }
     }
+    merge_compatible_agent_candidates(&mut changed);
     dedup_candidates(&mut changed);
     if changed.is_empty() {
         return Ok(Decision::Value(canonical_now));
@@ -476,6 +738,7 @@ fn value_present(value: &UnitValue) -> bool {
         UnitValue::Mcp(v) => v.is_some(),
         UnitValue::Instructions(v) => v.as_ref().map(|b| !is_placeholder(b)).unwrap_or(false),
         UnitValue::Skill(v) => v.is_some(),
+        UnitValue::Agent(v) => v.is_some(),
     }
 }
 
@@ -492,6 +755,54 @@ fn dedup_candidates(values: &mut Vec<Candidate>) {
     *values = unique;
 }
 
+/// Equivalent portable definitions from different CLIs are one change even
+/// though each carries a different namespaced native extension. Merge those
+/// namespaces; conflicting values in the same namespace remain a conflict.
+fn merge_compatible_agent_candidates(values: &mut Vec<Candidate>) {
+    let mut merged: Vec<Candidate> = Vec::new();
+    for candidate in values.drain(..) {
+        let UnitValue::Agent(Some(agent)) = &candidate.value else {
+            merged.push(candidate);
+            continue;
+        };
+        let mut core = agent.clone();
+        core.extensions.clear();
+        let compatible = merged.iter().position(|existing| {
+            let UnitValue::Agent(Some(other)) = &existing.value else {
+                return false;
+            };
+            let mut other_core = other.clone();
+            other_core.extensions.clear();
+            if core != other_core {
+                return false;
+            }
+            agent.extensions.iter().all(|(namespace, value)| {
+                other
+                    .extensions
+                    .get(namespace)
+                    .map(|existing| existing == value)
+                    .unwrap_or(true)
+            })
+        });
+        if let Some(index) = compatible {
+            let existing = &mut merged[index];
+            existing.source.push(',');
+            existing.source.push_str(&candidate.source);
+            if let UnitValue::Agent(Some(target)) = &mut existing.value {
+                for (namespace, value) in &agent.extensions {
+                    target
+                        .extensions
+                        .entry(namespace.clone())
+                        .or_insert_with(|| value.clone());
+                }
+            }
+        } else {
+            merged.push(candidate);
+        }
+    }
+    *values = merged;
+}
+
 fn sanitize(s: &str) -> String {
     s.chars()
         .map(|c| {
@@ -504,21 +815,343 @@ fn sanitize(s: &str) -> String {
         .collect()
 }
 
-fn read_canonical() -> R<ContentSnapshot> {
+fn read_canonical(include_agents: bool) -> R<ContentSnapshot> {
     let canonical = store::load_canonical()?;
     Ok(ContentSnapshot {
         mcp: canonical.servers,
         instructions: fs::read(paths::store_instructions()).ok(),
         skills: read_skills(&paths::store_skills())?,
+        agents: if include_agents {
+            read_canonical_agents(&paths::store_agents())?
+        } else {
+            BTreeMap::new()
+        },
     })
 }
 
-fn read_endpoint(cli: Cli) -> R<ContentSnapshot> {
+fn read_endpoint(cli: Cli, include_agents: bool) -> R<ContentSnapshot> {
     Ok(ContentSnapshot {
         mcp: adapters::read_mcp(cli)?,
         instructions: fs::read(paths::instructions_file(cli)).ok(),
         skills: read_skills(&paths::skills_dir(cli))?,
+        agents: if include_agents {
+            read_native_agents(cli, &paths::agents_dir(cli))?
+        } else {
+            BTreeMap::new()
+        },
     })
+}
+
+fn agent_format(cli: Cli) -> NativeAgentFormat {
+    match cli {
+        Cli::Claude => NativeAgentFormat::Claude,
+        Cli::Codex => NativeAgentFormat::Codex,
+        Cli::Opencode => NativeAgentFormat::OpenCode,
+        Cli::Kiro => NativeAgentFormat::Kiro,
+        Cli::Antigravity => NativeAgentFormat::Agy,
+        Cli::Copilot => NativeAgentFormat::Copilot,
+    }
+}
+
+fn native_agent_path(cli: Cli, root: &Path, id: &str) -> PathBuf {
+    match cli {
+        Cli::Claude | Cli::Opencode => root.join(format!("{id}.md")),
+        Cli::Codex => root.join(format!("{id}.toml")),
+        Cli::Kiro => root.join(format!("{id}.json")),
+        Cli::Copilot => root.join(format!("{id}.agent.md")),
+        Cli::Antigravity => root.join(id).join("agent.json"),
+    }
+}
+
+fn read_native_agents(cli: Cli, root: &Path) -> R<BTreeMap<String, AgentDefinition>> {
+    let mut out = BTreeMap::new();
+    let Ok(entries) = fs::read_dir(root) else {
+        return Ok(out);
+    };
+    let format = agent_format(cli);
+    for entry in entries {
+        let entry = entry.map_err(|e| util::ctx(root, e))?;
+        let path = entry.path();
+        let id = if cli == Cli::Antigravity {
+            if !path.is_dir() || !path.join("agent.json").is_file() {
+                continue;
+            }
+            entry.file_name().to_string_lossy().to_string()
+        } else {
+            if !path.is_file() {
+                continue;
+            }
+            let file = entry.file_name().to_string_lossy().to_string();
+            match cli {
+                Cli::Claude | Cli::Opencode => file.strip_suffix(".md"),
+                Cli::Codex => file.strip_suffix(".toml"),
+                Cli::Kiro => file.strip_suffix(".json"),
+                Cli::Copilot => file.strip_suffix(".agent.md"),
+                Cli::Antigravity => unreachable!(),
+            }
+            .map(str::to_string)
+            .unwrap_or_default()
+        };
+        if id.is_empty() || id.starts_with('.') || format.is_reserved(&id) {
+            continue;
+        }
+        let file = if cli == Cli::Antigravity {
+            path.join("agent.json")
+        } else {
+            path
+        };
+        let source = fs::read_to_string(&file).map_err(|e| util::ctx(&file, e))?;
+        let mut agent = format
+            .parse(&id, &source)
+            .map_err(|e| format!("invalid {} agent {}: {e}", cli.id(), file.display()))?;
+        let identity = match cli {
+            Cli::Claude | Cli::Codex => agent.name.clone(),
+            _ => id.clone(),
+        };
+        if !valid_agent_id(&identity) {
+            return Err(format!(
+                "invalid {} agent identity `{identity}` in {}",
+                cli.id(),
+                file.display()
+            ));
+        }
+        if cli == Cli::Antigravity && agent.name != id {
+            return Err(format!(
+                "agy agent directory `{id}` does not match JSON name `{}`",
+                agent.name
+            ));
+        }
+        if format.is_reserved(&identity) {
+            continue;
+        }
+        agent.id = identity.clone();
+        if out.insert(identity.clone(), agent).is_some() {
+            return Err(format!(
+                "duplicate {} agent identity `{identity}`",
+                cli.id()
+            ));
+        }
+    }
+    Ok(out)
+}
+
+fn inherit_other_agent_extensions(
+    current: &mut BTreeMap<String, AgentDefinition>,
+    baseline: Option<&BTreeMap<String, AgentDefinition>>,
+    own_namespace: &str,
+) {
+    let Some(baseline) = baseline else { return };
+    for (id, agent) in current {
+        let Some(previous) = baseline.get(id) else {
+            continue;
+        };
+        for (namespace, value) in &previous.extensions {
+            if namespace != own_namespace {
+                agent
+                    .extensions
+                    .entry(namespace.clone())
+                    .or_insert_with(|| value.clone());
+            }
+        }
+    }
+}
+
+fn read_canonical_agents(root: &Path) -> R<BTreeMap<String, AgentDefinition>> {
+    let mut out = BTreeMap::new();
+    let Ok(entries) = fs::read_dir(root) else {
+        return Ok(out);
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| util::ctx(root, e))?;
+        let dir = entry.path();
+        if !dir.is_dir() || entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let id = entry.file_name().to_string_lossy().to_string();
+        let meta_path = dir.join("agent.toml");
+        let prompt_path = dir.join("prompt.md");
+        if !meta_path.is_file() || !prompt_path.is_file() {
+            return Err(format!(
+                "canonical agent {id} must contain agent.toml and prompt.md"
+            ));
+        }
+        let text = fs::read_to_string(&meta_path).map_err(|e| util::ctx(&meta_path, e))?;
+        let doc: toml_edit::DocumentMut = text
+            .parse()
+            .map_err(|e: toml_edit::TomlError| util::ctx(&meta_path, e))?;
+        let string = |key: &str| doc.get(key).and_then(|v| v.as_str()).map(str::to_string);
+        let list = |key: &str| {
+            doc.get(key)
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let mut permissions = crate::agents::AgentPermissions::default();
+        if let Some(table) = doc.get("permissions").and_then(|v| v.as_table_like()) {
+            for (key, value) in table.iter() {
+                let policy = match value.as_str() {
+                    Some("allow") => CapabilityPolicy::Allow,
+                    Some("ask") => CapabilityPolicy::Ask,
+                    Some("deny") => CapabilityPolicy::Deny,
+                    _ => {
+                        return Err(format!(
+                            "invalid permission {key} in {}",
+                            meta_path.display()
+                        ))
+                    }
+                };
+                permissions.capabilities.insert(key.into(), policy);
+            }
+        }
+        let mut extensions = BTreeMap::new();
+        let ext_dir = dir.join("extensions");
+        if let Ok(exts) = fs::read_dir(&ext_dir) {
+            for ext in exts {
+                let ext = ext.map_err(|e| util::ctx(&ext_dir, e))?;
+                let path = ext.path();
+                let Some(namespace) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                    continue;
+                }
+                let value =
+                    serde_json::from_slice(&fs::read(&path).map_err(|e| util::ctx(&path, e))?)
+                        .map_err(|e| util::ctx(&path, e))?;
+                extensions.insert(namespace.into(), value);
+            }
+        }
+        out.insert(
+            id.clone(),
+            AgentDefinition {
+                id: string("id").unwrap_or(id),
+                name: string("name")
+                    .ok_or_else(|| format!("missing name in {}", meta_path.display()))?,
+                description: string("description").unwrap_or_default(),
+                instructions: fs::read_to_string(&prompt_path)
+                    .map_err(|e| util::ctx(&prompt_path, e))?,
+                role: match string("role").as_deref() {
+                    Some("primary") => AgentRole::Primary,
+                    Some("subagent") => AgentRole::Subagent,
+                    _ => AgentRole::Either,
+                },
+                model: match string("model").as_deref() {
+                    Some("fast") => ModelIntent::Fast,
+                    Some("balanced") => ModelIntent::Balanced,
+                    Some("strong") => ModelIntent::Strong,
+                    _ => ModelIntent::Inherit,
+                },
+                permissions,
+                skills: list("skills"),
+                mcp_servers: list("mcp_servers"),
+                extensions,
+            },
+        );
+    }
+    Ok(out)
+}
+
+fn canonical_agent_tree(agent: &AgentDefinition) -> R<Tree> {
+    let quoted = |value: &str| serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into());
+    let array = |values: &[String]| {
+        values
+            .iter()
+            .map(|v| quoted(v))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let role = match agent.role {
+        AgentRole::Primary => "primary",
+        AgentRole::Subagent => "subagent",
+        AgentRole::Either => "either",
+    };
+    let model = match agent.model {
+        ModelIntent::Inherit => "inherit",
+        ModelIntent::Fast => "fast",
+        ModelIntent::Balanced => "balanced",
+        ModelIntent::Strong => "strong",
+    };
+    let mut meta = format!(
+        "id = {}\nname = {}\ndescription = {}\nrole = {}\nmodel = {}\nskills = [{}]\nmcp_servers = [{}]\n",
+        quoted(&agent.id), quoted(&agent.name), quoted(&agent.description), quoted(role), quoted(model),
+        array(&agent.skills), array(&agent.mcp_servers)
+    );
+    if !agent.permissions.capabilities.is_empty() {
+        meta.push_str("\n[permissions]\n");
+        for (key, policy) in &agent.permissions.capabilities {
+            let policy = match policy {
+                CapabilityPolicy::Deny => "deny",
+                CapabilityPolicy::Ask => "ask",
+                CapabilityPolicy::Allow => "allow",
+            };
+            meta.push_str(&format!("{} = {}\n", quoted(key), quoted(policy)));
+        }
+    }
+    let mut tree = Tree::new();
+    tree.insert(
+        "agent.toml".into(),
+        FileBlob {
+            data: meta.into_bytes(),
+            executable: false,
+        },
+    );
+    tree.insert(
+        "prompt.md".into(),
+        FileBlob {
+            data: agent.instructions.as_bytes().to_vec(),
+            executable: false,
+        },
+    );
+    for (namespace, value) in &agent.extensions {
+        tree.insert(
+            format!("extensions/{namespace}.json"),
+            FileBlob {
+                data: serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?,
+                executable: false,
+            },
+        );
+    }
+    Ok(tree)
+}
+
+fn validate_agents(
+    agents: &BTreeMap<String, AgentDefinition>,
+    skills: &BTreeMap<String, Tree>,
+    mcp: &McpMap,
+) -> R<()> {
+    for (id, agent) in agents {
+        if id != &agent.id || !valid_agent_id(id) {
+            return Err(format!("invalid canonical agent id `{id}`"));
+        }
+        for skill in &agent.skills {
+            if !skills.contains_key(skill) {
+                return Err(format!(
+                    "agent `{id}` references missing canonical skill `{skill}`"
+                ));
+            }
+        }
+        for server in &agent.mcp_servers {
+            if !mcp.contains_key(server) {
+                return Err(format!(
+                    "agent `{id}` references missing canonical MCP server `{server}`"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn valid_agent_id(id: &str) -> bool {
+    !id.is_empty()
+        && !id.starts_with('.')
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
 
 fn read_skills(root: &Path) -> R<BTreeMap<String, Tree>> {
@@ -621,6 +1254,24 @@ fn all_skill_names(
     names
 }
 
+fn all_agent_names(
+    state: &SyncState,
+    canonical: &ContentSnapshot,
+    endpoints: &BTreeMap<Cli, ContentSnapshot>,
+) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    names.extend(canonical.agents.keys().cloned());
+    names.extend(state.canonical.content.agents.keys().cloned());
+    for value in endpoints.values() {
+        names.extend(value.agents.keys().cloned());
+    }
+    for value in state.endpoints.values() {
+        names.extend(value.content.agents.keys().cloned());
+    }
+    names
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_operations(
     active: &[Cli],
     canonical_now: &ContentSnapshot,
@@ -629,6 +1280,7 @@ fn build_operations(
     mcp: bool,
     instructions: bool,
     skills: bool,
+    agents: bool,
 ) -> R<Vec<Operation>> {
     let mut ops = Vec::new();
     if mcp {
@@ -663,6 +1315,21 @@ fn build_operations(
                     .map(Node::Dir)
                     .unwrap_or(Node::Absent),
                 label: format!("canonical skill {name}"),
+            });
+        }
+    }
+    if agents {
+        for name in union_keys(&canonical_now.agents, &desired.agents) {
+            ops.push(Operation {
+                path: paths::store_agents().join(&name),
+                after: desired
+                    .agents
+                    .get(&name)
+                    .map(canonical_agent_tree)
+                    .transpose()?
+                    .map(Node::Dir)
+                    .unwrap_or(Node::Absent),
+                label: format!("canonical agent {name}"),
             });
         }
     }
@@ -712,6 +1379,32 @@ fn build_operations(
                         .map(Node::Dir)
                         .unwrap_or(Node::Absent),
                     label: format!("{} skill {}", cli.id(), name),
+                });
+            }
+        }
+        if agents {
+            let current = endpoint_now
+                .get(&cli)
+                .map(|c| &c.agents)
+                .cloned()
+                .unwrap_or_default();
+            let format = agent_format(cli);
+            for name in union_keys(&current, &desired.agents) {
+                if format.is_reserved(&name) {
+                    continue;
+                }
+                let path = native_agent_path(cli, &paths::agents_dir(cli), &name);
+                let after = match desired.agents.get(&name) {
+                    Some(agent) => {
+                        let rendered = format.render(agent)?.into_bytes();
+                        Node::File(rendered)
+                    }
+                    None => Node::Absent,
+                };
+                ops.push(Operation {
+                    path,
+                    after,
+                    label: format!("{} agent {}", cli.id(), name),
                 });
             }
         }
@@ -816,7 +1509,7 @@ pub fn list_conflicts() -> R<Vec<ConflictRecord>> {
 pub fn public_conflict(record: &ConflictRecord) -> Value {
     let candidates = record.candidates.iter().map(|candidate| {
         let summary = match &candidate.value {
-            UnitValue::Mcp(None) | UnitValue::Instructions(None) | UnitValue::Skill(None) => json!({"deleted": true}),
+            UnitValue::Mcp(None) | UnitValue::Instructions(None) | UnitValue::Skill(None) | UnitValue::Agent(None) => json!({"deleted": true}),
             UnitValue::Mcp(Some(server)) => json!({
                 "transport": server.transport,
                 "protocol_hint": server.protocol_hint,
@@ -829,6 +1522,16 @@ pub fn public_conflict(record: &ConflictRecord) -> Value {
             }),
             UnitValue::Instructions(Some(bytes)) => json!({"bytes": bytes.len(), "hash": util::fingerprint(bytes), "preview": String::from_utf8_lossy(bytes).chars().take(500).collect::<String>()}),
             UnitValue::Skill(Some(tree)) => json!({"files": tree.keys().collect::<Vec<_>>(), "hash": tree_hash(tree)}),
+            UnitValue::Agent(Some(agent)) => json!({
+                "name": agent.name,
+                "description": agent.description,
+                "role": agent.role,
+                "model": agent.model,
+                "skills": agent.skills,
+                "mcp_servers": agent.mcp_servers,
+                "prompt_hash": util::fingerprint(agent.instructions.as_bytes()),
+                "prompt_preview": agent.instructions.chars().take(500).collect::<String>(),
+            }),
         };
         json!({"source": candidate.source, "summary": summary})
     }).collect::<Vec<_>>();

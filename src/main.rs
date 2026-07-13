@@ -1,7 +1,8 @@
-//! cli-switch — keep MCP servers, skills, and instructions in sync across
+//! cli-switch — keep MCP servers, skills, instructions, and custom agents in sync across
 //! Claude Code, Codex, opencode, Kiro, Antigravity, and GitHub Copilot.
 
 mod adapters;
+mod agents;
 mod config;
 mod configure;
 mod engine;
@@ -198,6 +199,7 @@ fn cmd_init() -> R<()> {
         paths::store_instructions().display()
     );
     println!("  skills/:         {}", paths::store_skills().display());
+    println!("  agents/:         {}", paths::store_agents().display());
     println!("  config:          {}", paths::store_config().display());
     println!("\nNext: `cli-switch sync` to pull existing config in, then `cli-switch mount` to auto-sync on startup.");
     Ok(())
@@ -289,18 +291,21 @@ pub(crate) fn print_status() -> R<()> {
 fn status_global(cfg: &config::Config) -> R<()> {
     let canonical = store::load_canonical()?;
     let canonical_skill_count = count_dirs(&paths::store_skills());
+    let canonical_agent_count = count_dirs(&paths::store_agents());
     println!(
-        "canonical: {} MCP server(s), instructions={}, skills={}",
+        "canonical: {} MCP server(s), instructions={}, skills={}, agents={} ({})",
         canonical.servers.len(),
         yn(paths::store_instructions().exists()),
-        canonical_skill_count
+        canonical_skill_count,
+        canonical_agent_count,
+        if cfg.agents { "enabled" } else { "disabled" }
     );
     println!();
     println!(
-        "{:<13} {:<8} {:<10} {:<7} {:<13} {:<8} {:<10}",
-        "CLI", "sync", "installed", "mcp", "instructions", "skills", "startup"
+        "{:<13} {:<8} {:<10} {:<7} {:<13} {:<8} {:<8} {:<10}",
+        "CLI", "sync", "installed", "mcp", "instructions", "skills", "agents", "startup"
     );
-    println!("{}", "-".repeat(78));
+    println!("{}", "-".repeat(87));
 
     for cli in Cli::ALL {
         let installed = adapters::installed(cli);
@@ -312,14 +317,18 @@ fn status_global(cfg: &config::Config) -> R<()> {
         let skills = active
             && count_synced_skills(&paths::skills_dir(cli), &paths::store_skills())
                 == canonical_skill_count;
+        let agents = active
+            && cfg.agents
+            && count_native_agents(cli, &paths::agents_dir(cli)) == canonical_agent_count;
         println!(
-            "{:<13} {:<8} {:<10} {:<7} {:<13} {:<8} {:<10}",
+            "{:<13} {:<8} {:<10} {:<7} {:<13} {:<8} {:<8} {:<10}",
             cli.id(),
             yn(configured),
             yn(installed),
             yn(mcp),
             yn(instr),
             yn(skills),
+            yn(agents),
             yn(startup_ok(cli))
         );
     }
@@ -368,29 +377,41 @@ fn status_project(cfg: &config::Config) -> R<()> {
         }
     );
     println!(
+        ".cli-switch/agents: {} agent(s) ({})",
+        count_dirs(&paths::project_agents()),
+        if cfg.agents { "enabled" } else { "disabled" }
+    );
+    println!(
         "antigravity rule: {}",
         antigravity_rule_state(&antigravity_rule)
     );
     println!();
     println!(
-        "{:<13} {:<8} {:<10} {:<13} {:<8} {:<10}",
-        "CLI", "sync", "installed", "instructions", "skills", "startup"
+        "{:<13} {:<8} {:<10} {:<13} {:<8} {:<8} {:<10}",
+        "CLI", "sync", "installed", "instructions", "skills", "agents", "startup"
     );
-    println!("{}", "-".repeat(68));
+    println!("{}", "-".repeat(77));
 
+    let canonical_agent_count = count_dirs(&paths::project_agents());
     for cli in Cli::ALL {
         let configured = cfg.clis.contains(&cli);
+        let installed = adapters::installed(cli);
         let instructions = configured
             && cfg.instructions
             && project_instruction_ok(cli, &root, &agents, &antigravity_rule);
         let skills_state = configured && cfg.skills && project_skills_ok(cli, &root, &skills);
+        let agents_state = configured
+            && installed
+            && cfg.agents
+            && count_native_agents(cli, &paths::project_agents_dir(cli)) == canonical_agent_count;
         println!(
-            "{:<13} {:<8} {:<10} {:<13} {:<8} {:<10}",
+            "{:<13} {:<8} {:<10} {:<13} {:<8} {:<8} {:<10}",
             cli.id(),
             yn(configured),
-            yn(adapters::installed(cli)),
+            yn(installed),
             yn(instructions),
             yn(skills_state),
+            yn(agents_state),
             yn(startup_ok(cli))
         );
     }
@@ -463,6 +484,61 @@ fn count_dirs(dir: &std::path::Path) -> usize {
             rd.flatten()
                 .filter(|e| e.path().is_dir())
                 .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn count_native_agents(cli: Cli, dir: &std::path::Path) -> usize {
+    let format = match cli {
+        Cli::Claude => agents::NativeAgentFormat::Claude,
+        Cli::Codex => agents::NativeAgentFormat::Codex,
+        Cli::Opencode => agents::NativeAgentFormat::OpenCode,
+        Cli::Kiro => agents::NativeAgentFormat::Kiro,
+        Cli::Antigravity => agents::NativeAgentFormat::Agy,
+        Cli::Copilot => agents::NativeAgentFormat::Copilot,
+    };
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| {
+                    let path = entry.path();
+                    let filename = entry.file_name().to_string_lossy().to_string();
+                    let id = match cli {
+                        Cli::Antigravity => {
+                            if !path.join("agent.json").is_file() {
+                                return false;
+                            }
+                            filename
+                        }
+                        Cli::Claude | Cli::Opencode => {
+                            let Some(id) = filename.strip_suffix(".md") else {
+                                return false;
+                            };
+                            id.to_string()
+                        }
+                        Cli::Codex => {
+                            let Some(id) = filename.strip_suffix(".toml") else {
+                                return false;
+                            };
+                            id.to_string()
+                        }
+                        Cli::Kiro => {
+                            let Some(id) = filename.strip_suffix(".json") else {
+                                return false;
+                            };
+                            id.to_string()
+                        }
+                        Cli::Copilot => {
+                            let Some(id) = filename.strip_suffix(".agent.md") else {
+                                return false;
+                            };
+                            id.to_string()
+                        }
+                    };
+                    !format.is_reserved(&id)
+                })
                 .count()
         })
         .unwrap_or(0)
@@ -602,7 +678,7 @@ fn link_ok(link: &std::path::Path, want: &std::path::Path) -> bool {
 
 fn print_help() {
     println!(
-        r#"cli-switch {VERSION} — sync MCP servers, skills & instructions across AI CLIs
+        r#"cli-switch {VERSION} — sync MCP servers, skills, instructions & custom agents across AI CLIs
 
 USAGE:
     cli-switch [command]
@@ -610,7 +686,7 @@ USAGE:
 COMMANDS:
     configure       Open the setup menu; default when no command is given
     init            Create the canonical store (~/.config/cli-switch) and config
-    sync            Plan and transactionally sync MCP, skills, and instructions
+    sync            Transactionally sync MCP, skills, instructions, and agents
         --prune       remove servers gone from every CLI (default: keep + warn)
         --dry-run     show what would change without writing
         --quiet       only print warnings/errors (used by startup hooks)
@@ -628,11 +704,13 @@ Global sync store at ~/.config/cli-switch:
     mcp.json        canonical MCP servers (neutral format)
     AGENTS.md       canonical shared instructions
     skills/         canonical atomic skill directories
+    agents/         canonical custom-agent bundles (opt-in)
     config.toml     which CLIs / features to sync
 
 Project sync uses the current directory:
     AGENTS.md       project instructions source of truth
     .agents/skills/ shared project skills
+    .cli-switch/agents/ canonical project-agent bundles (opt-in)
     .agents/rules/  Antigravity rule files
 
 Run `cli-switch configure --help` for non-interactive setup options.

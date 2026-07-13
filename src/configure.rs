@@ -76,6 +76,7 @@ fn configure_global(args: &[String], no_prompt: bool) -> util::R<Vec<Cli>> {
         (None, true) => default_clis,
         (None, false) => prompt_clis("Sync which CLIs globally?", &default_clis)?,
     };
+    let agents = select_agents(args, no_prompt, has_config && existing.agents)?;
 
     store::ensure_scaffold()?;
 
@@ -85,6 +86,7 @@ fn configure_global(args: &[String], no_prompt: bool) -> util::R<Vec<Cli>> {
         mcp: true,
         skills: true,
         instructions: true,
+        agents,
     };
     config::save(&cfg)?;
 
@@ -94,6 +96,10 @@ fn configure_global(args: &[String], no_prompt: bool) -> util::R<Vec<Cli>> {
         clis.iter().map(|c| c.id()).collect::<Vec<_>>().join(", ")
     );
     println!("  config: {}", paths::store_config().display());
+    println!(
+        "  agents: {} (opt-in)",
+        if agents { "enabled" } else { "disabled" }
+    );
 
     Ok(clis)
 }
@@ -105,6 +111,7 @@ fn configure_project(args: &[String], no_prompt: bool) -> util::R<Vec<Cli>> {
         mcp: false,
         skills: true,
         instructions: true,
+        agents: false,
     });
     let clis_arg = match arg_value(args, "--clis") {
         Some(raw) => Some(parse_cli_selection(&raw, &[])?),
@@ -113,9 +120,10 @@ fn configure_project(args: &[String], no_prompt: bool) -> util::R<Vec<Cli>> {
 
     let clis = match (clis_arg, no_prompt) {
         (Some(clis), _) => clis,
-        (None, true) => existing.clis,
+        (None, true) => existing.clis.clone(),
         (None, false) => prompt_clis("Sync which CLIs for this project?", &existing.clis)?,
     };
+    let agents = select_agents(args, no_prompt, existing.agents)?;
 
     util::ensure_dir(&paths::project_config_dir())?;
     let cfg = Config {
@@ -124,6 +132,7 @@ fn configure_project(args: &[String], no_prompt: bool) -> util::R<Vec<Cli>> {
         mcp: false,
         skills: true,
         instructions: true,
+        agents,
     };
     config::save_project(&cfg)?;
 
@@ -134,12 +143,18 @@ fn configure_project(args: &[String], no_prompt: bool) -> util::R<Vec<Cli>> {
         clis.iter().map(|c| c.id()).collect::<Vec<_>>().join(", ")
     );
     println!("  config:  {}", paths::project_config().display());
+    println!(
+        "  agents:  {} (opt-in)",
+        if agents { "enabled" } else { "disabled" }
+    );
 
     Ok(clis)
 }
 
 fn configure_global_from_setup() -> util::R<()> {
     let clis = setup_clis()?;
+    let existing = config::load().unwrap_or_default();
+    let agents = prompt_yes_no("Sync custom agents globally?", existing.agents)?;
     store::ensure_scaffold()?;
     let cfg = Config {
         scope: Scope::Global,
@@ -147,6 +162,7 @@ fn configure_global_from_setup() -> util::R<()> {
         mcp: true,
         skills: true,
         instructions: true,
+        agents,
     };
     config::save(&cfg)?;
     println!("Configured global cli-switch sync:");
@@ -155,11 +171,24 @@ fn configure_global_from_setup() -> util::R<()> {
         clis.iter().map(|c| c.id()).collect::<Vec<_>>().join(", ")
     );
     println!("  config: {}", paths::store_config().display());
+    println!(
+        "  agents: {} (opt-in)",
+        if agents { "enabled" } else { "disabled" }
+    );
     Ok(())
 }
 
 fn configure_project_from_setup() -> util::R<()> {
     let clis = setup_clis()?;
+    let existing = config::load_project()?.unwrap_or_else(|| Config {
+        scope: Scope::Project,
+        clis: clis.clone(),
+        mcp: false,
+        skills: true,
+        instructions: true,
+        agents: false,
+    });
+    let agents = prompt_yes_no("Sync custom agents for this project?", existing.agents)?;
     util::ensure_dir(&paths::project_config_dir())?;
     let cfg = Config {
         scope: Scope::Project,
@@ -167,6 +196,7 @@ fn configure_project_from_setup() -> util::R<()> {
         mcp: false,
         skills: true,
         instructions: true,
+        agents,
     };
     config::save_project(&cfg)?;
     println!("Joined project sync:");
@@ -176,6 +206,10 @@ fn configure_project_from_setup() -> util::R<()> {
         clis.iter().map(|c| c.id()).collect::<Vec<_>>().join(", ")
     );
     println!("  config:  {}", paths::project_config().display());
+    println!(
+        "  agents:  {} (opt-in)",
+        if agents { "enabled" } else { "disabled" }
+    );
     Ok(())
 }
 
@@ -258,6 +292,7 @@ fn remove_global_level() -> util::R<()> {
         mcp: true,
         skills: true,
         instructions: true,
+        agents: false,
     };
     store::ensure_scaffold()?;
     config::save(&cfg)?;
@@ -316,6 +351,22 @@ fn arg_value(args: &[String], key: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn select_agents(args: &[String], no_prompt: bool, default: bool) -> util::R<bool> {
+    if has_flag(args, "--agents") && has_flag(args, "--no-agents") {
+        return Err("Use only one of `--agents` and `--no-agents`.".to_string());
+    }
+    if has_flag(args, "--agents") {
+        return Ok(true);
+    }
+    if has_flag(args, "--no-agents") {
+        return Ok(false);
+    }
+    if no_prompt {
+        return Ok(default);
+    }
+    prompt_yes_no("Sync custom agents?", default)
 }
 
 fn installed_clis() -> Vec<Cli> {
@@ -445,7 +496,7 @@ fn prompt(message: &str) -> util::R<String> {
 fn print_help() {
     println!(
         r#"Usage:
-    cli-switch configure [--scope global|project --clis <list> --yes]
+    cli-switch configure [--scope global|project --clis <list> --agents|--no-agents --yes]
 
 Without options, configure opens this menu:
     1) setup cli           select CLIs once and install startup sync
@@ -458,7 +509,10 @@ Without options, configure opens this menu:
 Examples:
     cli-switch
     cli-switch configure --scope global --clis claude,codex --yes
-    cli-switch configure --scope project --clis installed --yes
+    cli-switch configure --scope project --clis installed --agents --yes
+
+Custom-agent sync is opt-in. Pass --agents to enable it in non-interactive
+configuration, or answer the custom-agent prompt in the menu.
 "#
     );
 }

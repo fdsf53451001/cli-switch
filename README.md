@@ -1,6 +1,6 @@
 # cli-switch
 
-Keep your **MCP servers, skills, and instructions** in sync across multiple AI CLIs — automatically.
+Keep your **MCP servers, skills, instructions, and custom agents** in sync across multiple AI CLIs — automatically.
 
 Supports: **Claude Code · Codex · opencode · Kiro · Antigravity CLI (`agy`) · GitHub Copilot CLI (`copilot`)**
 
@@ -8,18 +8,35 @@ Supports: **Claude Code · Codex · opencode · Kiro · Antigravity CLI (`agy`) 
 
 ## The Problem
 
-You're managing MCP servers, skills, and instruction files separately in multiple AI CLIs, all with incompatible formats. `cli-switch` gives you a single place to edit, and syncs everything everywhere.
+You're managing MCP servers, skills, instruction files, and reusable agents separately in multiple AI CLIs, all with incompatible formats. `cli-switch` gives you a single place to edit, and syncs everything everywhere.
 
 ---
 
 ## Install
 
+macOS / Linux:
+
 ```bash
-git clone https://github.com/fdsf53451001/cli-switch && cd cli-switch
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/fdsf53451001/cli-switch/main/install.sh | bash
 ```
 
 Pre-built binaries for macOS (Apple Silicon / Intel), Linux x86_64, and Windows x86_64. No Rust required.
+
+### Update
+
+Run the installer again; configuration and snapshots are preserved:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fdsf53451001/cli-switch/main/install.sh | bash
+cli-switch --version
+```
+
+To install an exact release instead of `latest`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fdsf53451001/cli-switch/main/install.sh \
+  | CLI_SWITCH_VERSION=v0.2.0 bash
+```
 
 ---
 
@@ -43,6 +60,12 @@ From PowerShell:
 
 ```powershell
 irm https://raw.githubusercontent.com/fdsf53451001/cli-switch/main/install.ps1 | iex
+```
+
+The same command updates an existing Windows installation. For an exact release:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/fdsf53451001/cli-switch/main/install.ps1))) -Version v0.2.0
 ```
 
 The Windows installer places `cli-switch.exe` in `~/.local/bin`. Core synchronization is supported on macOS, Linux, and Windows; startup-hook support is reported separately by `cli-switch status`.
@@ -69,6 +92,7 @@ cli-switch rollback <transaction-id>
 - **MCP servers** — edit once in `~/.config/cli-switch/mcp.json`; converted to each CLI's native format on sync
 - **Instructions** — independent native files compared with the last successful snapshot
 - **Skills** — each skill directory is synchronized as one atomic unit
+- **Custom agents** — opt-in, direct native files (no plugin or MCP control plane), with portable core fields and namespaced native extensions
 - **Bidirectional** — changes made inside any CLI are merged back on the next sync
 - **Fail closed** — divergent edits create a conflict packet and leave every managed file untouched
 - **Transactional** — a failed write rolls the entire sync back; successful transactions can be explicitly restored
@@ -77,7 +101,20 @@ Conflict JSON always masks MCP environment and header values. Discuss the packet
 
 ### Project-level sync
 
-Run `cli-switch` inside a project directory and choose **Set project level** to sync that project's instructions and skills across CLIs. Uses `AGENTS.md` and `.agents/skills/` as the shared source.
+Run `cli-switch` inside a project directory and choose **Set project level** to sync that project's instructions, skills, and optionally custom agents across CLIs. Uses `AGENTS.md`, `.agents/skills/`, and `.cli-switch/agents/` as the shared sources. Global and project agent snapshots are independent.
+
+### Custom-agent sync
+
+Agent sync is deliberately disabled on upgrade. Enable it interactively or with:
+
+```bash
+cli-switch configure --scope global --agents --yes
+cli-switch configure --scope project --agents --yes
+```
+
+Canonical agents live at `~/.config/cli-switch/agents/<id>/` with `agent.toml`, `prompt.md`, and optional `extensions/<cli>.json`. They are rendered directly to each CLI's native agent directory. Built-in IDs are excluded. Missing skill/MCP references, unsupported permission translations, malformed native files, or divergent edits fail closed before any write. Deleting a previously snapshotted custom agent propagates without requiring `--prune`; an absent agent on first adoption does not count as deletion.
+
+On agy builds where file-based agents do not appear in the `/agents` picker, the native file can still be invoked by name; this is an upstream discovery UI limitation. Copilot may require a restart to discover newly created agent files.
 
 ### Auto-sync on startup
 
@@ -97,6 +134,7 @@ Everything lives in `~/.config/cli-switch/`:
 mcp.json     # Canonical MCP servers
 AGENTS.md    # Canonical shared instructions
 skills/      # Canonical shared skills
+agents/      # Canonical custom-agent bundles (opt-in)
 config.toml  # Which CLIs and scopes are active
 state/       # Private snapshots, pending conflicts, and last 10 transactions
 ```

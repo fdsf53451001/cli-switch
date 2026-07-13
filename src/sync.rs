@@ -54,6 +54,7 @@ fn run_global(cfg: &Config, active: &[Cli], opts: &Options) -> R<()> {
         cfg.mcp,
         cfg.instructions,
         cfg.skills,
+        cfg.agents,
         &engine::Options {
             dry_run: opts.dry_run,
             quiet: opts.quiet,
@@ -77,6 +78,7 @@ fn run_global(cfg: &Config, active: &[Cli], opts: &Options) -> R<()> {
                 cfg.mcp,
                 cfg.instructions,
                 cfg.skills,
+                cfg.agents,
                 &engine::Options {
                     dry_run: false,
                     quiet: false,
@@ -176,6 +178,35 @@ fn confirm(prompt: &str) -> R<bool> {
 fn sync_project(cfg: &Config, opts: &Options) -> R<()> {
     if cfg.clis.is_empty() {
         return Ok(());
+    }
+    if cfg.agents {
+        let active = config::active_clis(cfg);
+        let agent_out = engine::run_project_agents(
+            &active,
+            &engine::Options {
+                dry_run: opts.dry_run,
+                quiet: opts.quiet,
+                prune: opts.prune,
+                allow_migration: false,
+            },
+        )?;
+        if !agent_out.conflicts.is_empty() {
+            for conflict in &agent_out.conflicts {
+                eprintln!(
+                    "  project: conflict {} {} [{}]",
+                    conflict.kind, conflict.name, conflict.id
+                );
+            }
+            return Err("unresolved conflicts".into());
+        }
+        if !opts.quiet {
+            for action in agent_out.actions {
+                println!("  project: {action}");
+            }
+            if let Some(id) = agent_out.transaction {
+                println!("  project transaction: {id}");
+            }
+        }
     }
     let out = project::sync(
         &cfg.clis,
