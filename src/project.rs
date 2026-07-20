@@ -53,8 +53,10 @@ pub fn sync(clis: &[Cli], opts: &Options) -> R<Outcome> {
     if !opts.dry_run {
         ensure_gitignore(&root, clis, &mut out)?;
     } else {
-        out.actions
-            .push(format!("would maintain {}", root.join(".gitignore").display()));
+        out.actions.push(format!(
+            "would maintain {}",
+            root.join(".gitignore").display()
+        ));
     }
 
     Ok(out)
@@ -492,8 +494,10 @@ fn ensure_gitignore(root: &Path, clis: &[Cli], out: &mut Outcome) -> R<()> {
         .filter(|e| !present.contains(*e))
         .collect();
     if to_add.is_empty() {
-        out.notes
-            .push(format!("{} already covers cli-switch entries", path.display()));
+        out.notes.push(format!(
+            "{} already covers cli-switch entries",
+            path.display()
+        ));
         return Ok(());
     }
     to_add.sort();
@@ -512,11 +516,8 @@ fn ensure_gitignore(root: &Path, clis: &[Cli], out: &mut Outcome) -> R<()> {
     }
 
     util::write_atomic(&path, &body)?;
-    out.actions.push(format!(
-        "added {} to {}",
-        to_add.join(", "),
-        path.display()
-    ));
+    out.actions
+        .push(format!("added {} to {}", to_add.join(", "), path.display()));
     Ok(())
 }
 

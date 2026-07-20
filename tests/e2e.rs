@@ -406,9 +406,7 @@ fn configure_project(sandbox: &Sandbox, features: &str) {
     fs::create_dir_all(sandbox.project.join(".cli-switch")).unwrap();
     fs::write(
         sandbox.project.join(".cli-switch/config.toml"),
-        format!(
-            "scope = \"project\"\nclis = [\"claude\", \"codex\"]\n[features]\n{features}\n",
-        ),
+        format!("scope = \"project\"\nclis = [\"claude\", \"codex\"]\n[features]\n{features}\n",),
     )
     .unwrap();
 }
@@ -418,7 +416,10 @@ fn configure_project(sandbox: &Sandbox, features: &str) {
 fn project_link_existing_claude_md_file_is_merged_into_agents_then_symlinked() {
     let sandbox = Sandbox::new("project-merge");
     sandbox.install_two_clis();
-    configure_project(&sandbox, "mcp = false\nskills = false\ninstructions = true\nagents = false");
+    configure_project(
+        &sandbox,
+        "mcp = false\nskills = false\ninstructions = true\nagents = false",
+    );
     fs::write(
         sandbox.project.join("AGENTS.md"),
         "# Shared\n\nLine only in AGENTS.md.\n",
@@ -448,7 +449,11 @@ fn project_link_existing_claude_md_file_is_merged_into_agents_then_symlinked() {
     let merged = fs::read_to_string(sandbox.project.join("AGENTS.md")).unwrap();
     assert!(merged.contains("Line only in AGENTS.md."));
     assert!(merged.contains("Line only in CLAUDE.md."));
-    assert_eq!(merged.matches("# Shared").count(), 1, "shared anchor duplicated");
+    assert_eq!(
+        merged.matches("# Shared").count(),
+        1,
+        "shared anchor duplicated"
+    );
     assert!(text(&result).contains("merged existing"));
 }
 
@@ -457,9 +462,20 @@ fn project_link_existing_claude_md_file_is_merged_into_agents_then_symlinked() {
 fn project_link_claude_md_with_no_common_anchor_is_reported_as_conflict() {
     let sandbox = Sandbox::new("project-merge-conflict");
     sandbox.install_two_clis();
-    configure_project(&sandbox, "mcp = false\nskills = false\ninstructions = true\nagents = false");
-    fs::write(sandbox.project.join("AGENTS.md"), "completely different content A\n").unwrap();
-    fs::write(sandbox.project.join("CLAUDE.md"), "totally unrelated content B\n").unwrap();
+    configure_project(
+        &sandbox,
+        "mcp = false\nskills = false\ninstructions = true\nagents = false",
+    );
+    fs::write(
+        sandbox.project.join("AGENTS.md"),
+        "completely different content A\n",
+    )
+    .unwrap();
+    fs::write(
+        sandbox.project.join("CLAUDE.md"),
+        "totally unrelated content B\n",
+    )
+    .unwrap();
 
     let result = sandbox.command(&["sync"]);
     assert!(result.status.success(), "{}", text(&result));
@@ -488,7 +504,10 @@ fn project_link_claude_md_with_no_common_anchor_is_reported_as_conflict() {
 fn project_sync_maintains_gitignore_for_cli_private_dirs() {
     let sandbox = Sandbox::new("project-gitignore");
     sandbox.install_two_clis();
-    configure_project(&sandbox, "mcp = false\nskills = false\ninstructions = true\nagents = false");
+    configure_project(
+        &sandbox,
+        "mcp = false\nskills = false\ninstructions = true\nagents = false",
+    );
     fs::write(sandbox.project.join("AGENTS.md"), "# instructions\n").unwrap();
     fs::write(sandbox.project.join("CLAUDE.md"), "# instructions\n").unwrap();
 
@@ -498,8 +517,14 @@ fn project_sync_maintains_gitignore_for_cli_private_dirs() {
     let gi = fs::read_to_string(sandbox.project.join(".gitignore")).unwrap();
     assert!(gi.contains(".claude/"));
     assert!(gi.contains(".cli-switch/"));
-    assert!(!gi.contains(".agents/"), "canonical .agents/ must stay tracked");
-    assert!(!gi.contains("AGENTS.md"), "canonical AGENTS.md must stay tracked");
+    assert!(
+        !gi.contains(".agents/"),
+        "canonical .agents/ must stay tracked"
+    );
+    assert!(
+        !gi.contains("AGENTS.md"),
+        "canonical AGENTS.md must stay tracked"
+    );
 
     // Second run is a no-op for .gitignore.
     let second = sandbox.command(&["sync"]);
@@ -517,11 +542,18 @@ fn project_symlinks_are_relative_to_the_link_location() {
     use std::os::unix::fs::symlink;
     let sandbox = Sandbox::new("project-relative-links");
     sandbox.install_two_clis();
-    configure_project(&sandbox, "mcp = false\nskills = true\ninstructions = true\nagents = false");
+    configure_project(
+        &sandbox,
+        "mcp = false\nskills = true\ninstructions = true\nagents = false",
+    );
     fs::write(sandbox.project.join("AGENTS.md"), "# instructions\n").unwrap();
     fs::write(sandbox.project.join("CLAUDE.md"), "# instructions\n").unwrap();
     fs::create_dir_all(sandbox.project.join(".agents/skills/demo")).unwrap();
-    fs::write(sandbox.project.join(".agents/skills/demo/SKILL.md"), "# demo\n").unwrap();
+    fs::write(
+        sandbox.project.join(".agents/skills/demo/SKILL.md"),
+        "# demo\n",
+    )
+    .unwrap();
 
     let result = sandbox.command(&["sync"]);
     assert!(result.status.success(), "{}", text(&result));
