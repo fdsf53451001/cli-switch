@@ -283,10 +283,13 @@ activation: always
 fn link_path(target: &Path, link: &Path, dry_run: bool, out: &mut Outcome) -> R<()> {
     if let Ok(meta) = link.symlink_metadata() {
         if meta.file_type().is_symlink() {
-            let already_correct = fs::read_link(link)
-                .map(|current| same_link_target(&current, link, target))
-                .unwrap_or(false);
-            if already_correct {
+            let stored = fs::read_link(link).map_err(|e| util::ctx(link, e))?;
+            let points_to_target = same_link_target(&stored, link, target);
+            let expected_rel = relative_target(target, link);
+            let stored_matches_relative =
+                expected_rel.as_ref().map(|r| r == &stored).unwrap_or(false);
+
+            if points_to_target && stored_matches_relative {
                 out.notes.push(format!(
                     "already linked {} -> {}",
                     link.display(),

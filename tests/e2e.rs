@@ -547,7 +547,7 @@ fn project_symlinks_are_relative_to_the_link_location() {
     assert!(second.status.success(), "{}", text(&second));
     assert!(text(&second).contains("already linked"));
 
-    // An older absolute symlink is also recognized and not needlessly rewritten.
+    // An older absolute symlink is auto-rewritten to relative on the next sync.
     fs::remove_file(sandbox.project.join("CLAUDE.md")).unwrap();
     symlink(
         sandbox.project.join("AGENTS.md"),
@@ -556,11 +556,17 @@ fn project_symlinks_are_relative_to_the_link_location() {
     .unwrap();
     let third = sandbox.command(&["sync"]);
     assert!(third.status.success(), "{}", text(&third));
-    let after_abs = fs::read_link(sandbox.project.join("CLAUDE.md")).unwrap();
     assert!(
-        after_abs.is_absolute(),
-        "an already-correct absolute link should be left untouched"
+        text(&third).contains("relinked"),
+        "an absolute symlink must be rewritten to relative"
     );
+    let after = fs::read_link(sandbox.project.join("CLAUDE.md")).unwrap();
+    assert!(
+        after.is_relative(),
+        "CLAUDE.md symlink must now be relative, got {}",
+        after.display()
+    );
+    assert_eq!(after, std::path::Path::new("AGENTS.md"));
 }
 
 #[cfg(unix)]
