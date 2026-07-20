@@ -1175,7 +1175,6 @@ fn read_skills(root: &Path) -> R<BTreeMap<String, Tree>> {
 
 fn read_tree(root: &Path) -> R<Tree> {
     fn insert_file(root: &Path, path: &Path, source: &Path, out: &mut Tree) -> R<()> {
-        let meta = fs::metadata(source).map_err(|e| util::ctx(source, e))?;
         let rel = path
             .strip_prefix(root)
             .map_err(|e| e.to_string())?
@@ -1184,6 +1183,7 @@ fn read_tree(root: &Path) -> R<Tree> {
         #[cfg(unix)]
         let executable = {
             use std::os::unix::fs::PermissionsExt;
+            let meta = fs::metadata(source).map_err(|e| util::ctx(source, e))?;
             meta.permissions().mode() & 0o111 != 0
         };
         #[cfg(not(unix))]

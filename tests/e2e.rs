@@ -402,6 +402,7 @@ fn legacy_symlink_requires_explicit_migration() {
     );
 }
 
+#[cfg(unix)]
 fn configure_project(sandbox: &Sandbox, features: &str) {
     fs::create_dir_all(sandbox.project.join(".cli-switch")).unwrap();
     fs::write(
