@@ -59,7 +59,10 @@ pub fn write_atomic_bytes(path: &Path, contents: &[u8]) -> R<()> {
     ensure_parent(path)?;
     let tmp = path.with_extension(format!("{}.{}", tmp_ext(path), std::process::id()));
     let _ = fs::remove_file(&tmp);
-    fs::write(&tmp, contents).map_err(|e| ctx(&tmp, e))?;
+    if let Err(e) = fs::write(&tmp, contents) {
+        let _ = fs::remove_file(&tmp);
+        return Err(ctx(&tmp, e));
+    }
     match fs::rename(&tmp, path) {
         Ok(()) => Ok(()),
         Err(first) if path.exists() => {
@@ -92,6 +95,83 @@ fn tmp_ext(path: &Path) -> String {
     match path.extension().and_then(|e| e.to_str()) {
         Some(ext) => format!("{ext}.cli-switch-tmp"),
         None => "cli-switch-tmp".to_string(),
+    }
+}
+
+/// Serializes `Vec<u8>` fields as base64 instead of serde_json's default
+/// one-JSON-number-per-byte array, which bloats journal/state snapshots
+/// several-fold for anything but tiny files.
+pub mod base64_bytes {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    fn encode(bytes: &[u8]) -> String {
+        let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+        for chunk in bytes.chunks(3) {
+            let b0 = chunk[0];
+            let b1 = chunk.get(1).copied();
+            let b2 = chunk.get(2).copied();
+            out.push(ALPHABET[(b0 >> 2) as usize] as char);
+            out.push(ALPHABET[(((b0 & 0x03) << 4) | (b1.unwrap_or(0) >> 4)) as usize] as char);
+            out.push(match b1 {
+                Some(b1) => {
+                    ALPHABET[(((b1 & 0x0f) << 2) | (b2.unwrap_or(0) >> 6)) as usize] as char
+                }
+                None => '=',
+            });
+            out.push(match b2 {
+                Some(b2) => ALPHABET[(b2 & 0x3f) as usize] as char,
+                None => '=',
+            });
+        }
+        out
+    }
+
+    fn decode(s: &str) -> Result<Vec<u8>, String> {
+        fn value(c: u8) -> Result<u8, String> {
+            match c {
+                b'A'..=b'Z' => Ok(c - b'A'),
+                b'a'..=b'z' => Ok(c - b'a' + 26),
+                b'0'..=b'9' => Ok(c - b'0' + 52),
+                b'+' => Ok(62),
+                b'/' => Ok(63),
+                _ => Err(format!("invalid base64 byte: {c}")),
+            }
+        }
+        let s = s.as_bytes();
+        if !s.len().is_multiple_of(4) {
+            return Err("invalid base64 length".to_string());
+        }
+        let mut out = Vec::with_capacity(s.len() / 4 * 3);
+        for chunk in s.chunks(4) {
+            let pad = chunk.iter().filter(|&&c| c == b'=').count();
+            let v0 = value(chunk[0])?;
+            let v1 = value(chunk[1])?;
+            out.push((v0 << 2) | (v1 >> 4));
+            if chunk[2] != b'=' {
+                let v2 = value(chunk[2])?;
+                out.push((v1 << 4) | (v2 >> 2));
+                if chunk[3] != b'=' {
+                    let v3 = value(chunk[3])?;
+                    out.push((v2 << 6) | v3);
+                } else if pad != 1 {
+                    return Err("invalid base64 padding".to_string());
+                }
+            } else if pad != 2 {
+                return Err("invalid base64 padding".to_string());
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        encode(bytes).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(d)?;
+        decode(&s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -157,4 +237,22 @@ pub fn mtime_secs(path: &Path) -> u64 {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod base64_tests {
+    use super::base64_bytes::*;
+
+    #[test]
+    fn roundtrips_arbitrary_bytes() {
+        for len in 0..8 {
+            let bytes: Vec<u8> = (0..len).map(|i| (i * 37 + 5) as u8).collect();
+            let mut buf = Vec::new();
+            let mut ser = serde_json::Serializer::new(&mut buf);
+            serialize(&bytes, &mut ser).unwrap();
+            let mut de = serde_json::Deserializer::from_slice(&buf);
+            let round_tripped = deserialize(&mut de).unwrap();
+            assert_eq!(bytes, round_tripped);
+        }
+    }
 }

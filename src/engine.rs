@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileBlob {
+    #[serde(with = "util::base64_bytes")]
     pub data: Vec<u8>,
     #[serde(default)]
     pub executable: bool,
@@ -118,7 +119,7 @@ struct Resolution {
 #[serde(tag = "kind", content = "content", rename_all = "lowercase")]
 enum Node {
     Absent,
-    File(Vec<u8>),
+    File(#[serde(with = "util::base64_bytes")] Vec<u8>),
     Dir(Tree),
     Symlink(PathBuf),
 }
@@ -1205,6 +1206,13 @@ fn read_tree(root: &Path) -> R<Tree> {
             .map_err(|e| util::ctx(dir, e))?;
         entries.sort_by_key(|e| e.file_name());
         for entry in entries {
+            // Skills are sometimes authored inside a git checkout. `.git`
+            // holds no skill content but can be arbitrarily large (packed
+            // objects, history) and would otherwise be vendored into the
+            // canonical store and every CLI endpoint's snapshot.
+            if entry.file_name() == ".git" {
+                continue;
+            }
             let path = entry.path();
             let meta = fs::symlink_metadata(&path).map_err(|e| util::ctx(&path, e))?;
             if meta.file_type().is_symlink() {
@@ -1704,7 +1712,21 @@ fn node_hash(node: &Node) -> String {
     util::fingerprint(&serde_json::to_vec(node).unwrap_or_default())
 }
 
+/// A transaction that fails partway leaves its journal directory behind
+/// unless we clean it up here: callers only prune old transactions
+/// (`retain_transactions`) after a successful apply, so an error returned
+/// from this function would otherwise leak the journal it just wrote —
+/// forever, since the transaction can never succeed on retry with the same id.
 fn apply_transaction_with_id(operations: &[Operation], id: &str) -> R<()> {
+    let tx_dir = paths::transactions().join(id);
+    let result = apply_transaction_inner(operations, id, &tx_dir);
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&tx_dir);
+    }
+    result
+}
+
+fn apply_transaction_inner(operations: &[Operation], id: &str, tx_dir: &Path) -> R<()> {
     let mut entries = Vec::new();
     for op in operations {
         entries.push(JournalEntry {
@@ -1718,8 +1740,8 @@ fn apply_transaction_with_id(operations: &[Operation], id: &str) -> R<()> {
         created_ms: util::now_millis(),
         entries,
     };
-    let journal_path = paths::transactions().join(id).join("journal.json");
-    util::ensure_private_dir(journal_path.parent().unwrap())?;
+    let journal_path = tx_dir.join("journal.json");
+    util::ensure_private_dir(tx_dir)?;
     util::write_private(
         &journal_path,
         &serde_json::to_vec_pretty(&journal).map_err(|e| e.to_string())?,
@@ -1786,6 +1808,7 @@ pub fn rollback(id: &str) -> R<String> {
         }
     }
     apply_transaction_with_id(&ops, &new_id)?;
+    retain_transactions(10)?;
     Ok(new_id)
 }
 
@@ -1858,6 +1881,24 @@ mod tests {
         assert!(error.contains("escapes skill directory"), "{error}");
 
         fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn skill_tree_excludes_nested_git_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "cli-switch-git-skip-test-{}-{}",
+            std::process::id(),
+            util::now_millis()
+        ));
+        fs::create_dir_all(root.join(".git/objects")).unwrap();
+        fs::write(root.join(".git/objects/pack-file"), vec![0u8; 1024]).unwrap();
+        fs::write(root.join("SKILL.md"), b"# demo\n").unwrap();
+
+        let tree = read_tree(&root).unwrap();
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree["SKILL.md"].data, b"# demo\n");
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
