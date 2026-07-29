@@ -1,6 +1,6 @@
 [package]
 name = "cli-switch"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Sync MCP servers, skills, instructions, and custom agents across AI CLIs"
 repository = "https://github.com/fdsf53451001/cli-switch"

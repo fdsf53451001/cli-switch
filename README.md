@@ -35,7 +35,7 @@ To install an exact release instead of `latest`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/fdsf53451001/cli-switch/main/install.sh \
-  | CLI_SWITCH_VERSION=v0.2.0 bash
+  | CLI_SWITCH_VERSION=v0.3.0 bash
 ```
 
 ---
@@ -65,7 +65,7 @@ irm https://raw.githubusercontent.com/fdsf53451001/cli-switch/main/install.ps1 |
 The same command updates an existing Windows installation. For an exact release:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/fdsf53451001/cli-switch/main/install.ps1))) -Version v0.2.0
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/fdsf53451001/cli-switch/main/install.ps1))) -Version v0.3.0
 ```
 
 The Windows installer places `cli-switch.exe` in `~/.local/bin`. Core synchronization is supported on macOS, Linux, and Windows; startup-hook support is reported separately by `cli-switch status`.

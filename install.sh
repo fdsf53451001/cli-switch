@@ -6,7 +6,7 @@
 # download fails, or you set CLI_SWITCH_FROM_SOURCE=1) it builds from source.
 #
 # Overrides:
-#   CLI_SWITCH_VERSION=v0.2.0      a specific tag (default: latest)
+#   CLI_SWITCH_VERSION=v0.3.0      a specific tag (default: latest)
 #   CLI_SWITCH_BIN_DIR=~/.local/bin  install location
 #   CLI_SWITCH_FROM_SOURCE=1       force building from source
 set -euo pipefail
