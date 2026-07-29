@@ -247,7 +247,7 @@ fn setup_cli() -> util::R<()> {
 
     println!();
     println!("Current status:");
-    crate::print_status()?;
+    let _ = crate::print_status()?;
     Ok(())
 }
 
@@ -333,7 +333,7 @@ fn finish() -> util::R<()> {
 
     println!();
     println!("Current status:");
-    crate::print_status()?;
+    let _ = crate::print_status()?;
     Ok(())
 }
 

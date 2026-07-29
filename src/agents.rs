@@ -92,6 +92,11 @@ impl NativeAgentFormat {
         }
     }
 
+    /// Ids and names a CLI generates for itself. These are never a sync source
+    /// and are never written to: adopting a vendor's auto-generated default
+    /// agent would turn an opt-in feature into a scraper of files the user
+    /// never chose to share. Matched against both the file id and the `name`
+    /// field, case-insensitively.
     pub fn reserved_ids(self) -> &'static [&'static str] {
         match self {
             Self::Codex => &["default", "worker", "explorer"],
@@ -112,8 +117,10 @@ impl NativeAgentFormat {
                 "title",
                 "summary",
             ],
-            Self::Kiro => &["kiro_default"],
-            Self::Copilot => &["copilot", "code-review", "explore"],
+            // Kiro/Amazon Q write a `default.json` on first launch whose
+            // `name` is `q_ide_default` or `q_cli_default`.
+            Self::Kiro => &["kiro_default", "default", "q_ide_default", "q_cli_default"],
+            Self::Copilot => &["copilot", "code-review", "explore", "default"],
             Self::Agy => &["default", "research", "browser", "self"],
         }
     }
@@ -147,8 +154,9 @@ impl NativeAgentFormat {
             && !agent.extensions.contains_key(self.namespace())
         {
             return Err(format!(
-                "cannot translate permissions into {} without proven native semantics",
-                self.namespace()
+                "cannot translate permissions into {} without proven native semantics (capabilities: {})",
+                self.namespace(),
+                capability_list(&agent.permissions)
             ));
         }
         match self {
@@ -259,9 +267,10 @@ fn render_markdown(
             meta.insert("role".into(), Value::String(role_name(agent.role).into()));
             let (allow, deny, ask) = partition_permissions(&agent.permissions);
             if !ask.is_empty() {
-                return Err(
-                    "Claude Markdown cannot express ask permissions without widening them".into(),
-                );
+                return Err(format!(
+                    "Claude Markdown cannot express ask permissions without widening them (ask: {})",
+                    ask.join(", ")
+                ));
             }
             insert_array(&mut meta, "tools", allow);
             insert_array(&mut meta, "disallowedTools", deny);
@@ -270,7 +279,11 @@ fn render_markdown(
             meta.insert("role".into(), Value::String(role_name(agent.role).into()));
             let (allow, deny, ask) = partition_permissions(&agent.permissions);
             if !deny.is_empty() || !ask.is_empty() {
-                return Err("Copilot .agent.md cannot express deny/ask permissions safely".into());
+                return Err(format!(
+                    "Copilot .agent.md cannot express deny/ask permissions safely (deny: {}; ask: {})",
+                    join_or_none(&deny),
+                    join_or_none(&ask)
+                ));
             }
             insert_array(&mut meta, "tools", allow);
         }
@@ -339,13 +352,18 @@ fn render_codex(agent: &AgentDefinition) -> Result<String> {
         return Err("abstract model intent requires an explicit Codex model mapping".into());
     }
     let write = agent.permissions.capabilities.get("filesystem.write");
-    if agent
+    let unsupported = agent
         .permissions
         .capabilities
         .keys()
-        .any(|k| k != "filesystem.write")
-    {
-        return Err("Codex TOML cannot safely express portable per-capability permissions".into());
+        .filter(|k| k.as_str() != "filesystem.write")
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unsupported.is_empty() {
+        return Err(format!(
+            "Codex TOML cannot safely express portable per-capability permissions (capabilities: {})",
+            unsupported.join(", ")
+        ));
     }
     match write {
         Some(CapabilityPolicy::Deny) => doc["sandbox_mode"] = value("read-only"),
@@ -431,7 +449,11 @@ fn render_kiro(agent: &AgentDefinition) -> Result<String> {
     }
     let (allow, deny, ask) = partition_permissions(&agent.permissions);
     if !deny.is_empty() || !ask.is_empty() {
-        return Err("Kiro allowedTools cannot express deny/ask permissions safely".into());
+        return Err(format!(
+            "Kiro allowedTools cannot express deny/ask permissions safely (deny: {}; ask: {})",
+            join_or_none(&deny),
+            join_or_none(&ask)
+        ));
     }
     insert_array(&mut obj, "allowedTools", allow.clone());
     insert_array(&mut obj, "tools", allow);
@@ -503,7 +525,11 @@ fn parse_agy(id: &str, source: &str) -> Result<AgentDefinition> {
 fn render_agy(agent: &AgentDefinition) -> Result<String> {
     let (allow, deny, ask) = partition_permissions(&agent.permissions);
     if !deny.is_empty() || !ask.is_empty() {
-        return Err("Agy toolNames cannot express deny/ask permissions safely".into());
+        return Err(format!(
+            "Agy toolNames cannot express deny/ask permissions safely (deny: {}; ask: {})",
+            join_or_none(&deny),
+            join_or_none(&ask)
+        ));
     }
     let mut obj = native_extension(agent, "agy");
     obj.insert("name".into(), Value::String(agent.id.clone()));
@@ -838,6 +864,32 @@ fn permission_value(value: &AgentPermissions) -> Value {
         }
     }
     Value::Object(root)
+}
+
+/// `capability=policy` pairs, so a translation failure names the exact fields
+/// the user has to look at instead of only the destination format.
+fn capability_list(value: &AgentPermissions) -> String {
+    value
+        .capabilities
+        .iter()
+        .map(|(key, policy)| {
+            let policy = match policy {
+                CapabilityPolicy::Deny => "deny",
+                CapabilityPolicy::Ask => "ask",
+                CapabilityPolicy::Allow => "allow",
+            };
+            format!("{key}={policy}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn join_or_none(values: &[String]) -> String {
+    if values.is_empty() {
+        "none".into()
+    } else {
+        values.join(", ")
+    }
 }
 
 fn partition_permissions(value: &AgentPermissions) -> (Vec<String>, Vec<String>, Vec<String>) {

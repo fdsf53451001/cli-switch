@@ -147,16 +147,171 @@ struct Operation {
 
 pub struct Options {
     pub dry_run: bool,
-    pub quiet: bool,
     pub prune: bool,
     pub allow_migration: bool,
+}
+
+/// The four independently synchronizable classes of configuration. They are
+/// separate units of failure: a problem inside one of them must never stop the
+/// other three from being applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Feature {
+    Mcp,
+    Instructions,
+    Skills,
+    Agents,
+}
+
+impl Feature {
+    pub const ALL: [Feature; 4] = [
+        Feature::Mcp,
+        Feature::Instructions,
+        Feature::Skills,
+        Feature::Agents,
+    ];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Feature::Mcp => "mcp",
+            Feature::Instructions => "instructions",
+            Feature::Skills => "skills",
+            Feature::Agents => "agents",
+        }
+    }
+
+    fn from_conflict_kind(kind: &str) -> Option<Feature> {
+        match kind {
+            "mcp" => Some(Feature::Mcp),
+            "instructions" => Some(Feature::Instructions),
+            "skill" => Some(Feature::Skills),
+            "agent" | "project-agent" => Some(Feature::Agents),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FeatureSet {
+    pub mcp: bool,
+    pub instructions: bool,
+    pub skills: bool,
+    pub agents: bool,
+}
+
+impl FeatureSet {
+    pub fn get(self, feature: Feature) -> bool {
+        match feature {
+            Feature::Mcp => self.mcp,
+            Feature::Instructions => self.instructions,
+            Feature::Skills => self.skills,
+            Feature::Agents => self.agents,
+        }
+    }
+
+    pub fn set(&mut self, feature: Feature, value: bool) {
+        match feature {
+            Feature::Mcp => self.mcp = value,
+            Feature::Instructions => self.instructions = value,
+            Feature::Skills => self.skills = value,
+            Feature::Agents => self.agents = value,
+        }
+    }
+}
+
+/// A feature this sync deliberately left untouched, and everything the user
+/// needs to find the cause: which feature, which named unit inside it, and a
+/// fully located reason.
+#[derive(Debug, Clone)]
+pub struct Skipped {
+    /// Why it was skipped, in one machine-readable word: `source` (unreadable
+    /// or unparseable input), `translate` (no lossless native representation),
+    /// or `conflict` (needs an explicit human choice).
+    pub code: &'static str,
+    pub feature: Feature,
+    pub unit: Option<String>,
+    pub reason: String,
+}
+
+impl Skipped {
+    pub fn summary(&self) -> String {
+        match &self.unit {
+            Some(unit) => format!(
+                "{} ({unit}) [{}]: {}",
+                self.feature.id(),
+                self.code,
+                self.reason
+            ),
+            None => format!("{} [{}]: {}", self.feature.id(), self.code, self.reason),
+        }
+    }
 }
 
 pub struct Outcome {
     pub transaction: Option<String>,
     pub actions: Vec<String>,
     pub conflicts: Vec<ConflictRecord>,
+    /// Features that were analysed but not applied, with located reasons.
+    pub skipped: Vec<Skipped>,
     pub migration_required: bool,
+    /// Populated together with `migration_required`.
+    pub migration: Option<String>,
+}
+
+impl Outcome {
+    fn blocked(migration: String, analysis: Analysis) -> Outcome {
+        Outcome {
+            transaction: None,
+            actions: Vec::new(),
+            conflicts: analysis.conflicts,
+            skipped: analysis.skipped,
+            migration_required: true,
+            migration: Some(migration),
+        }
+    }
+}
+
+/// Accumulates feature-level degradations. Degrading a feature means: do not
+/// write it anywhere this run, and do not advance its snapshot either, so the
+/// same change is re-detected on the next run instead of being silently
+/// swallowed into the baseline.
+struct Degrade {
+    want: FeatureSet,
+    effective: FeatureSet,
+    degraded: FeatureSet,
+    skipped: Vec<Skipped>,
+}
+
+impl Degrade {
+    fn new(want: FeatureSet) -> Self {
+        Degrade {
+            want,
+            effective: want,
+            degraded: FeatureSet::default(),
+            skipped: Vec::new(),
+        }
+    }
+
+    fn feature(
+        &mut self,
+        code: &'static str,
+        feature: Feature,
+        unit: Option<String>,
+        reason: String,
+    ) {
+        let first = !self.degraded.get(feature);
+        self.degraded.set(feature, true);
+        self.effective.set(feature, false);
+        // Only report what the user actually asked us to sync, and only report
+        // a feature once — the first located cause is the actionable one.
+        if first && self.want.get(feature) {
+            self.skipped.push(Skipped {
+                code,
+                feature,
+                unit,
+                reason,
+            });
+        }
+    }
 }
 
 pub fn last_transaction() -> R<Option<String>> {
@@ -174,10 +329,18 @@ pub fn run_project_agents(active: &[Cli], opts: &Options) -> R<Outcome> {
         }
         _ => AgentScopeState::default(),
     };
-    let canonical_now = read_canonical_agents(&paths::project_agents())?;
+    let mut origins = AgentOrigins::default();
+    let canonical_now = match read_canonical_agents(&paths::project_agents(), &mut origins) {
+        Ok(agents) => agents,
+        Err(error) => return Ok(agents_degraded("source", None, error)),
+    };
     let mut endpoint_now = BTreeMap::new();
     for &cli in active {
-        let mut current = read_native_agents(cli, &paths::project_agents_dir(cli))?;
+        let mut current =
+            match read_native_agents(cli, &paths::project_agents_dir(cli), &mut origins) {
+                Ok(agents) => agents,
+                Err(error) => return Ok(agents_degraded("source", None, error)),
+            };
         inherit_other_agent_extensions(
             &mut current,
             state.endpoints.get(&cli).map(|s| &s.agents),
@@ -234,7 +397,15 @@ pub fn run_project_agents(active: &[Cli], opts: &Options) -> R<Outcome> {
     }
     let project_skills = read_skills(&paths::project_root().join(".agents").join("skills"))?;
     let global_mcp = store::load_canonical()?.servers;
-    validate_agents(&desired, &project_skills, &global_mcp)?;
+    if let Err((unit, reason)) = validate_agents(&desired, &project_skills, &global_mcp, &origins) {
+        return Ok(agents_degraded("source", Some(unit), reason));
+    }
+    // Prove every agent can be written to every target before touching
+    // anything: a definition that only one CLI can express must not be
+    // half-applied, and must not take the rest of the sync down with it.
+    if let Err((unit, reason)) = check_agent_translation(active, &desired, true, &origins) {
+        return Ok(agents_degraded("translate", Some(unit), reason));
+    }
     if !conflicts.is_empty() {
         if !opts.dry_run {
             save_conflicts(&conflicts)?;
@@ -243,7 +414,9 @@ pub fn run_project_agents(active: &[Cli], opts: &Options) -> R<Outcome> {
             transaction: None,
             actions: Vec::new(),
             conflicts,
+            skipped: Vec::new(),
             migration_required: false,
+            migration: None,
         });
     }
 
@@ -312,69 +485,156 @@ pub fn run_project_agents(active: &[Cli], opts: &Options) -> R<Outcome> {
             transaction: None,
             actions,
             conflicts: Vec::new(),
+            skipped: Vec::new(),
             migration_required: false,
+            migration: None,
         });
     }
     let id = transaction_id();
     apply_transaction_with_id(&operations, &id)?;
-    clear_resolved_conflicts()?;
+    clear_resolutions()?;
     retain_transactions(10)?;
     Ok(Outcome {
         transaction: Some(id),
         actions,
         conflicts: Vec::new(),
+        skipped: Vec::new(),
         migration_required: false,
+        migration: None,
     })
 }
 
-pub fn run(
-    active: &[Cli],
-    mcp: bool,
-    instructions: bool,
-    skills: bool,
-    agents: bool,
-    opts: &Options,
-) -> R<Outcome> {
-    let state = load_state()?;
-    let mut canonical_now = read_canonical(agents)?;
-    if !agents {
-        canonical_now.agents = state.canonical.content.agents.clone();
+/// The project-agents pass is a single feature, so any located failure inside
+/// it degrades exactly that feature and leaves the rest of the project sync
+/// (instructions, skills) to run normally.
+fn agents_degraded(code: &'static str, unit: Option<String>, reason: String) -> Outcome {
+    Outcome {
+        transaction: None,
+        actions: Vec::new(),
+        conflicts: Vec::new(),
+        skipped: vec![Skipped {
+            code,
+            feature: Feature::Agents,
+            unit,
+            reason,
+        }],
+        migration_required: false,
+        migration: None,
     }
-    let mut endpoint_now = BTreeMap::new();
-    for &cli in active {
-        let mut current = read_endpoint(cli, agents)?;
-        if agents {
-            inherit_other_agent_extensions(
-                &mut current.agents,
-                state.endpoints.get(&cli).map(|s| &s.content.agents),
-                agent_format(cli).namespace(),
-            );
-        } else if let Some(previous) = state.endpoints.get(&cli) {
-            current.agents = previous.content.agents.clone();
+}
+
+/// Everything a sync needs to decide what to write, plus everything it found
+/// wrong on the way. Producing this never writes to disk, so `preflight` can
+/// reuse it to report every blocker at once instead of one per run.
+struct Analysis {
+    previous: SyncState,
+    canonical_now: ContentSnapshot,
+    endpoint_now: BTreeMap<Cli, ContentSnapshot>,
+    desired: ContentSnapshot,
+    effective: FeatureSet,
+    conflicts: Vec<ConflictRecord>,
+    skipped: Vec<Skipped>,
+    legacy: Vec<PathBuf>,
+}
+
+fn analyze(active: &[Cli], want: FeatureSet, prune: bool) -> R<Analysis> {
+    let previous = load_state()?;
+    let mut degrade = Degrade::new(want);
+    let mut origins = AgentOrigins::default();
+
+    let mut canonical_now = ContentSnapshot::default();
+    match store::load_canonical() {
+        Ok(canonical) => canonical_now.mcp = canonical.servers,
+        Err(error) => degrade.feature(
+            "source",
+            Feature::Mcp,
+            None,
+            format!("canonical MCP store unreadable: {error}"),
+        ),
+    }
+    canonical_now.instructions = fs::read(paths::store_instructions()).ok();
+    match read_skills(&paths::store_skills()) {
+        Ok(skills) => canonical_now.skills = skills,
+        Err(error) => degrade.feature(
+            "source",
+            Feature::Skills,
+            None,
+            format!("canonical: {error}"),
+        ),
+    }
+    if want.agents {
+        match read_canonical_agents(&paths::store_agents(), &mut origins) {
+            Ok(agents) => canonical_now.agents = agents,
+            Err(error) => degrade.feature("source", Feature::Agents, None, error),
         }
-        endpoint_now.insert(cli, current);
+    } else {
+        // Keep the recorded baseline so a later opt-in still sees real changes.
+        canonical_now.agents = previous.canonical.content.agents.clone();
     }
 
-    let legacy = detect_legacy(active, instructions, skills);
-    if legacy && !opts.allow_migration {
-        return Ok(Outcome {
-            transaction: None,
-            actions: vec!["legacy symlinks detected; run `cli-switch sync --migrate` to preview and confirm conversion to independent copies".into()],
-            conflicts: Vec::new(),
-            migration_required: true,
-        });
+    let mut endpoint_now = BTreeMap::new();
+    for &cli in active {
+        let mut snapshot = ContentSnapshot::default();
+        match adapters::read_mcp(cli) {
+            Ok(servers) => snapshot.mcp = servers,
+            Err(error) => degrade.feature(
+                "source",
+                Feature::Mcp,
+                None,
+                format!(
+                    "{} MCP config unreadable ({}): {error}",
+                    cli.id(),
+                    paths::mcp_config(cli).display()
+                ),
+            ),
+        }
+        snapshot.instructions = fs::read(paths::instructions_file(cli)).ok();
+        match read_skills(&paths::skills_dir(cli)) {
+            Ok(skills) => snapshot.skills = skills,
+            Err(error) => degrade.feature(
+                "source",
+                Feature::Skills,
+                None,
+                format!("{}: {error}", cli.id()),
+            ),
+        }
+        if want.agents {
+            match read_native_agents(cli, &paths::agents_dir(cli), &mut origins) {
+                Ok(mut agents) => {
+                    inherit_other_agent_extensions(
+                        &mut agents,
+                        previous.endpoints.get(&cli).map(|s| &s.content.agents),
+                        agent_format(cli).namespace(),
+                    );
+                    snapshot.agents = agents;
+                }
+                Err(error) => degrade.feature("source", Feature::Agents, None, error),
+            }
+        } else if let Some(state) = previous.endpoints.get(&cli) {
+            snapshot.agents = state.content.agents.clone();
+        }
+        endpoint_now.insert(cli, snapshot);
     }
+
+    let legacy = legacy_symlinks(
+        active,
+        degrade.effective.instructions,
+        degrade.effective.skills,
+    );
 
     let scan_hash = scan_fingerprint(&canonical_now, &endpoint_now)?;
     let resolutions = load_resolutions()?;
     let mut conflicts = Vec::new();
     let mut desired = canonical_now.clone();
+    // Frozen before the merge loops so a failure found later cannot retroactively
+    // change which loops ran.
+    let readable = degrade.effective;
 
-    if mcp {
-        let names = all_mcp_names(&state, &canonical_now, &endpoint_now);
+    if readable.mcp {
+        let names = all_mcp_names(&previous, &canonical_now, &endpoint_now);
         for name in names {
             let canon_current = canonical_now.mcp.get(&name).cloned();
-            let canon_base = state.canonical.content.mcp.get(&name).cloned();
+            let canon_base = previous.canonical.content.mcp.get(&name).cloned();
             let sources = active
                 .iter()
                 .map(|cli| {
@@ -382,7 +642,7 @@ pub fn run(
                         .get(cli)
                         .and_then(|c| c.mcp.get(&name))
                         .cloned();
-                    let base_state = state.endpoints.get(cli);
+                    let base_state = previous.endpoints.get(cli);
                     let base = base_state.and_then(|s| s.content.mcp.get(&name)).cloned();
                     (
                         *cli,
@@ -396,7 +656,7 @@ pub fn run(
                 ("mcp", &name),
                 UnitValue::Mcp(canon_current.clone()),
                 UnitValue::Mcp(canon_base),
-                state.canonical.mcp_initialized,
+                previous.canonical.mcp_initialized,
                 sources
                     .into_iter()
                     .map(|(c, n, b, i)| (c.id().into(), UnitValue::Mcp(n), UnitValue::Mcp(b), i))
@@ -408,7 +668,7 @@ pub fn run(
                     desired.mcp.insert(name, value);
                 }
                 Decision::Value(UnitValue::Mcp(None)) => {
-                    if opts.prune {
+                    if prune {
                         desired.mcp.remove(&name);
                     }
                 }
@@ -418,12 +678,12 @@ pub fn run(
         }
     }
 
-    if instructions {
+    if readable.instructions {
         let sources = active
             .iter()
             .map(|cli| {
                 let current = endpoint_now.get(cli).and_then(|c| c.instructions.clone());
-                let base_state = state.endpoints.get(cli);
+                let base_state = previous.endpoints.get(cli);
                 let base = base_state.and_then(|s| s.content.instructions.clone());
                 (
                     *cli,
@@ -438,8 +698,8 @@ pub fn run(
         match decide(
             ("instructions", "global"),
             UnitValue::Instructions(canonical_now.instructions.clone()),
-            UnitValue::Instructions(state.canonical.content.instructions.clone()),
-            state.canonical.instructions_initialized,
+            UnitValue::Instructions(previous.canonical.content.instructions.clone()),
+            previous.canonical.instructions_initialized,
             sources
                 .into_iter()
                 .map(|(c, n, b, i)| {
@@ -460,8 +720,8 @@ pub fn run(
         }
     }
 
-    if skills {
-        let names = all_skill_names(&state, &canonical_now, &endpoint_now);
+    if readable.skills {
+        let names = all_skill_names(&previous, &canonical_now, &endpoint_now);
         for name in names {
             let sources = active
                 .iter()
@@ -470,7 +730,7 @@ pub fn run(
                         .get(cli)
                         .and_then(|c| c.skills.get(&name))
                         .cloned();
-                    let base_state = state.endpoints.get(cli);
+                    let base_state = previous.endpoints.get(cli);
                     let base = base_state
                         .and_then(|s| s.content.skills.get(&name))
                         .cloned();
@@ -485,8 +745,8 @@ pub fn run(
             match decide(
                 ("skill", &name),
                 UnitValue::Skill(canonical_now.skills.get(&name).cloned()),
-                UnitValue::Skill(state.canonical.content.skills.get(&name).cloned()),
-                state.canonical.skills_initialized,
+                UnitValue::Skill(previous.canonical.content.skills.get(&name).cloned()),
+                previous.canonical.skills_initialized,
                 sources
                     .into_iter()
                     .map(|(c, n, b, i)| {
@@ -500,7 +760,7 @@ pub fn run(
                     desired.skills.insert(name, tree);
                 }
                 Decision::Value(UnitValue::Skill(None)) => {
-                    if opts.prune {
+                    if prune {
                         desired.skills.remove(&name);
                     }
                 }
@@ -510,8 +770,8 @@ pub fn run(
         }
     }
 
-    if agents {
-        let names = all_agent_names(&state, &canonical_now, &endpoint_now);
+    if readable.agents {
+        let names = all_agent_names(&previous, &canonical_now, &endpoint_now);
         for name in names {
             let sources = active
                 .iter()
@@ -520,7 +780,7 @@ pub fn run(
                         .get(cli)
                         .and_then(|c| c.agents.get(&name))
                         .cloned();
-                    let base_state = state.endpoints.get(cli);
+                    let base_state = previous.endpoints.get(cli);
                     let base = base_state
                         .and_then(|s| s.content.agents.get(&name))
                         .cloned();
@@ -535,8 +795,8 @@ pub fn run(
             match decide(
                 ("agent", &name),
                 UnitValue::Agent(canonical_now.agents.get(&name).cloned()),
-                UnitValue::Agent(state.canonical.content.agents.get(&name).cloned()),
-                state.canonical.agents_initialized,
+                UnitValue::Agent(previous.canonical.content.agents.get(&name).cloned()),
+                previous.canonical.agents_initialized,
                 sources
                     .into_iter()
                     .map(|(c, n, b, i)| {
@@ -557,39 +817,263 @@ pub fn run(
                 _ => unreachable!(),
             }
         }
-        validate_agents(&desired.agents, &desired.skills, &desired.mcp)?;
+        // Prove the whole set is expressible everywhere before anything is
+        // written. A single untranslatable field costs the agents feature, and
+        // nothing else.
+        if let Err((unit, reason)) =
+            validate_agents(&desired.agents, &desired.skills, &desired.mcp, &origins)
+        {
+            degrade.feature("source", Feature::Agents, Some(unit), reason);
+        } else if let Err((unit, reason)) =
+            check_agent_translation(active, &desired.agents, false, &origins)
+        {
+            degrade.feature("translate", Feature::Agents, Some(unit), reason);
+        }
     }
 
-    if !conflicts.is_empty() {
-        if !opts.dry_run {
-            save_conflicts(&conflicts)?;
+    // A conflict is scoped to the feature that owns it. Divergent MCP edits are
+    // no reason to stop writing skills.
+    for conflict in &conflicts {
+        if let Some(feature) = Feature::from_conflict_kind(&conflict.kind) {
+            degrade.feature(
+                "conflict",
+                feature,
+                Some(conflict.name.clone()),
+                format!(
+                    "divergent edits need an explicit choice: `cli-switch conflicts resolve {} --source <source>`",
+                    conflict.id
+                ),
+            );
         }
-        return Ok(Outcome {
-            transaction: None,
-            actions: Vec::new(),
-            conflicts,
-            migration_required: false,
+    }
+
+    // A degraded feature must also keep its old baseline: advancing the
+    // snapshot for something we refused to write would swallow the change and
+    // hide it from every later run.
+    let empty = ContentSnapshot::default();
+    for feature in Feature::ALL {
+        if !degrade.degraded.get(feature) {
+            continue;
+        }
+        carry_over(feature, &mut canonical_now, &previous.canonical.content);
+        for (cli, snapshot) in endpoint_now.iter_mut() {
+            let base = previous
+                .endpoints
+                .get(cli)
+                .map(|e| &e.content)
+                .unwrap_or(&empty);
+            carry_over(feature, snapshot, base);
+        }
+    }
+
+    Ok(Analysis {
+        previous,
+        canonical_now,
+        endpoint_now,
+        desired,
+        effective: degrade.effective,
+        conflicts,
+        skipped: degrade.skipped,
+        legacy,
+    })
+}
+
+fn carry_over(feature: Feature, target: &mut ContentSnapshot, base: &ContentSnapshot) {
+    match feature {
+        Feature::Mcp => target.mcp = base.mcp.clone(),
+        Feature::Instructions => target.instructions = base.instructions.clone(),
+        Feature::Skills => target.skills = base.skills.clone(),
+        Feature::Agents => target.agents = base.agents.clone(),
+    }
+}
+
+/// Every blocker the next sync would hit, gathered in one pass.
+#[derive(Debug, Clone)]
+pub struct Blocker {
+    pub code: &'static str,
+    pub feature: Option<Feature>,
+    pub unit: Option<String>,
+    pub detail: String,
+}
+
+/// Read-only: report everything that would stand in the way of a full sync —
+/// legacy symlinks, unreadable sources, untranslatable agents, unresolved
+/// conflicts and unwritable targets — so they can be fixed in one round rather
+/// than discovered one per run.
+pub fn preflight(active: &[Cli], want: FeatureSet, probe_writes: bool) -> R<Vec<Blocker>> {
+    let analysis = analyze(active, want, false)?;
+    let mut blockers = Vec::new();
+    for path in &analysis.legacy {
+        blockers.push(Blocker {
+            code: "migration",
+            feature: None,
+            unit: None,
+            detail: format!(
+                "{} is a v0.1 symlink; confirm conversion with `cli-switch sync --migrate`",
+                path.display()
+            ),
         });
     }
+    for skipped in &analysis.skipped {
+        blockers.push(Blocker {
+            code: skipped.code,
+            feature: Some(skipped.feature),
+            unit: skipped.unit.clone(),
+            detail: skipped.reason.clone(),
+        });
+    }
+    if probe_writes {
+        for (path, reason) in write_blockers(active, want) {
+            blockers.push(Blocker {
+                code: "permission",
+                feature: None,
+                unit: None,
+                detail: format!("{}: {reason}", path.display()),
+            });
+        }
+    }
+    Ok(blockers)
+}
 
-    let mut operations = build_operations(
-        active,
-        &canonical_now,
-        &endpoint_now,
-        &desired,
+/// Targets we would have to write. Checked without changing anything the user
+/// can observe: existing files are opened for append, missing ones are probed
+/// by creating and immediately removing a marker in the nearest existing
+/// parent directory.
+fn write_blockers(active: &[Cli], want: FeatureSet) -> Vec<(PathBuf, String)> {
+    let mut targets = vec![paths::store_root(), paths::store_state_dir()];
+    if want.mcp {
+        targets.push(paths::store_mcp());
+    }
+    if want.instructions {
+        targets.push(paths::store_instructions());
+    }
+    if want.skills {
+        targets.push(paths::store_skills());
+    }
+    if want.agents {
+        targets.push(paths::store_agents());
+    }
+    for &cli in active {
+        if want.mcp {
+            targets.push(paths::mcp_config(cli));
+        }
+        if want.instructions {
+            targets.push(paths::instructions_file(cli));
+        }
+        if want.skills {
+            targets.push(paths::skills_dir(cli));
+        }
+        if want.agents {
+            targets.push(paths::agents_dir(cli));
+        }
+    }
+    targets
+        .into_iter()
+        .filter_map(|path| write_blocker(&path).map(|reason| (path, reason)))
+        .collect()
+}
+
+fn write_blocker(path: &Path) -> Option<String> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .err()
+            .map(|e| format!("not writable ({e})")),
+        Ok(meta) if meta.is_dir() => probe_dir(path),
+        Ok(_) => None,
+        Err(_) => {
+            let mut parent = path.parent();
+            while let Some(dir) = parent {
+                if dir.is_dir() {
+                    return probe_dir(dir)
+                        .map(|reason| format!("parent {} {reason}", dir.display()));
+                }
+                parent = dir.parent();
+            }
+            None
+        }
+    }
+}
+
+fn probe_dir(dir: &Path) -> Option<String> {
+    let probe = dir.join(format!(".cli-switch-write-probe-{}", std::process::id()));
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
+        Ok(_) => {
+            let _ = fs::remove_file(&probe);
+            None
+        }
+        // An existing probe means a concurrent run, not a permission problem.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => None,
+        Err(e) => Some(format!("not writable ({e})")),
+    }
+}
+
+fn migration_message(legacy: &[PathBuf]) -> String {
+    let mut message = String::from(
+        "legacy v0.1 symlinks detected; run `cli-switch sync --migrate` to convert them to independent copies",
+    );
+    for path in legacy {
+        message.push_str(&format!("\n    {}", path.display()));
+    }
+    message
+}
+
+pub fn run(
+    active: &[Cli],
+    mcp: bool,
+    instructions: bool,
+    skills: bool,
+    agents: bool,
+    opts: &Options,
+) -> R<Outcome> {
+    let want = FeatureSet {
         mcp,
         instructions,
         skills,
         agents,
-    )?;
-    let mut next_state = state;
+    };
+    let analysis = analyze(active, want, opts.prune)?;
+    if !opts.dry_run {
+        save_conflicts(&analysis.conflicts)?;
+    }
+
+    // The migration gate stays fail-closed — it rewrites the user's file layout
+    // and needs consent — but it now reports everything else found alongside it
+    // instead of hiding the next blocker until this one is cleared.
+    if !analysis.legacy.is_empty() && !opts.allow_migration {
+        return Ok(Outcome::blocked(
+            migration_message(&analysis.legacy),
+            analysis,
+        ));
+    }
+
+    let Analysis {
+        previous,
+        canonical_now,
+        endpoint_now,
+        desired,
+        effective,
+        conflicts,
+        skipped,
+        ..
+    } = analysis;
+
+    let mut operations =
+        build_operations(active, &canonical_now, &endpoint_now, &desired, effective)?;
+    let mut next_state = previous;
     next_state.version = 2;
     next_state.canonical = EndpointSnapshot {
-        mcp_initialized: next_state.canonical.mcp_initialized || mcp,
-        instructions_initialized: next_state.canonical.instructions_initialized || instructions,
-        skills_initialized: next_state.canonical.skills_initialized || skills,
-        agents_initialized: next_state.canonical.agents_initialized || agents,
-        content: merged_snapshot(&canonical_now, &desired, mcp, instructions, skills, agents),
+        mcp_initialized: next_state.canonical.mcp_initialized || effective.mcp,
+        instructions_initialized: next_state.canonical.instructions_initialized
+            || effective.instructions,
+        skills_initialized: next_state.canonical.skills_initialized || effective.skills,
+        agents_initialized: next_state.canonical.agents_initialized || effective.agents,
+        content: merged_snapshot(&canonical_now, &desired, effective),
     };
     for &cli in active {
         let current = endpoint_now.get(&cli).cloned().unwrap_or_default();
@@ -597,11 +1081,12 @@ pub fn run(
         next_state.endpoints.insert(
             cli,
             EndpointSnapshot {
-                mcp_initialized: previous.mcp_initialized || mcp,
-                instructions_initialized: previous.instructions_initialized || instructions,
-                skills_initialized: previous.skills_initialized || skills,
-                agents_initialized: previous.agents_initialized || agents,
-                content: merged_snapshot(&current, &desired, mcp, instructions, skills, agents),
+                mcp_initialized: previous.mcp_initialized || effective.mcp,
+                instructions_initialized: previous.instructions_initialized
+                    || effective.instructions,
+                skills_initialized: previous.skills_initialized || effective.skills,
+                agents_initialized: previous.agents_initialized || effective.agents,
+                content: merged_snapshot(&current, &desired, effective),
             },
         );
     }
@@ -621,8 +1106,10 @@ pub fn run(
         return Ok(Outcome {
             transaction: None,
             actions,
-            conflicts: Vec::new(),
+            conflicts,
+            skipped,
             migration_required: false,
+            migration: None,
         });
     }
 
@@ -635,44 +1122,40 @@ pub fn run(
         label: "state snapshot".into(),
     });
     apply_transaction_with_id(&operations, &id)?;
-    clear_resolved_conflicts()?;
+    clear_resolutions()?;
     retain_transactions(10)?;
-    if !opts.quiet {
-        // Caller prints the detailed action list.
-    }
     Ok(Outcome {
         transaction: Some(id),
         actions,
-        conflicts: Vec::new(),
+        conflicts,
+        skipped,
         migration_required: false,
+        migration: None,
     })
 }
 
 fn merged_snapshot(
     current: &ContentSnapshot,
     desired: &ContentSnapshot,
-    mcp: bool,
-    instructions: bool,
-    skills: bool,
-    agents: bool,
+    applied: FeatureSet,
 ) -> ContentSnapshot {
     ContentSnapshot {
-        mcp: if mcp {
+        mcp: if applied.mcp {
             desired.mcp.clone()
         } else {
             current.mcp.clone()
         },
-        instructions: if instructions {
+        instructions: if applied.instructions {
             desired.instructions.clone()
         } else {
             current.instructions.clone()
         },
-        skills: if skills {
+        skills: if applied.skills {
             desired.skills.clone()
         } else {
             current.skills.clone()
         },
-        agents: if agents {
+        agents: if applied.agents {
             desired.agents.clone()
         } else {
             current.agents.clone()
@@ -816,31 +1299,26 @@ fn sanitize(s: &str) -> String {
         .collect()
 }
 
-fn read_canonical(include_agents: bool) -> R<ContentSnapshot> {
-    let canonical = store::load_canonical()?;
-    Ok(ContentSnapshot {
-        mcp: canonical.servers,
-        instructions: fs::read(paths::store_instructions()).ok(),
-        skills: read_skills(&paths::store_skills())?,
-        agents: if include_agents {
-            read_canonical_agents(&paths::store_agents())?
-        } else {
-            BTreeMap::new()
-        },
-    })
+/// Where each agent id was read from, so a failure can name the exact file the
+/// user has to open instead of leaving them to grep every CLI's agents
+/// directory. Kept beside the definitions rather than inside them: origin is
+/// not part of an agent's identity and must never affect equality or snapshots.
+#[derive(Debug, Default, Clone)]
+pub struct AgentOrigins {
+    by_id: BTreeMap<String, BTreeSet<String>>,
 }
 
-fn read_endpoint(cli: Cli, include_agents: bool) -> R<ContentSnapshot> {
-    Ok(ContentSnapshot {
-        mcp: adapters::read_mcp(cli)?,
-        instructions: fs::read(paths::instructions_file(cli)).ok(),
-        skills: read_skills(&paths::skills_dir(cli))?,
-        agents: if include_agents {
-            read_native_agents(cli, &paths::agents_dir(cli))?
-        } else {
-            BTreeMap::new()
-        },
-    })
+impl AgentOrigins {
+    fn note(&mut self, id: &str, label: String) {
+        self.by_id.entry(id.to_string()).or_default().insert(label);
+    }
+
+    fn describe(&self, id: &str) -> String {
+        match self.by_id.get(id) {
+            Some(sources) => sources.iter().cloned().collect::<Vec<_>>().join(", "),
+            None => "no known source file".into(),
+        }
+    }
 }
 
 fn agent_format(cli: Cli) -> NativeAgentFormat {
@@ -864,8 +1342,13 @@ fn native_agent_path(cli: Cli, root: &Path, id: &str) -> PathBuf {
     }
 }
 
-fn read_native_agents(cli: Cli, root: &Path) -> R<BTreeMap<String, AgentDefinition>> {
+fn read_native_agents(
+    cli: Cli,
+    root: &Path,
+    origins: &mut AgentOrigins,
+) -> R<BTreeMap<String, AgentDefinition>> {
     let mut out = BTreeMap::new();
+    let mut seen: BTreeMap<String, PathBuf> = BTreeMap::new();
     let Ok(entries) = fs::read_dir(root) else {
         return Ok(out);
     };
@@ -918,20 +1401,28 @@ fn read_native_agents(cli: Cli, root: &Path) -> R<BTreeMap<String, AgentDefiniti
         }
         if cli == Cli::Antigravity && agent.name != id {
             return Err(format!(
-                "agy agent directory `{id}` does not match JSON name `{}`",
-                agent.name
+                "agy agent directory `{id}` does not match JSON name `{}` in {}",
+                agent.name,
+                file.display()
             ));
         }
-        if format.is_reserved(&identity) {
+        // A CLI's own auto-generated agents are never a sync source: this
+        // feature is opt-in, and the user opted into sharing their agents, not
+        // into adopting whatever default file a vendor writes on first launch.
+        if format.is_reserved(&identity) || format.is_reserved(&agent.name) {
             continue;
         }
         agent.id = identity.clone();
-        if out.insert(identity.clone(), agent).is_some() {
+        origins.note(&identity, format!("{} {}", cli.id(), file.display()));
+        if let Some(first) = seen.insert(identity.clone(), file.clone()) {
             return Err(format!(
-                "duplicate {} agent identity `{identity}`",
-                cli.id()
+                "duplicate {} agent identity `{identity}` in {} and {}",
+                cli.id(),
+                first.display(),
+                file.display()
             ));
         }
+        out.insert(identity, agent);
     }
     Ok(out)
 }
@@ -957,7 +1448,10 @@ fn inherit_other_agent_extensions(
     }
 }
 
-fn read_canonical_agents(root: &Path) -> R<BTreeMap<String, AgentDefinition>> {
+fn read_canonical_agents(
+    root: &Path,
+    origins: &mut AgentOrigins,
+) -> R<BTreeMap<String, AgentDefinition>> {
     let mut out = BTreeMap::new();
     let Ok(entries) = fs::read_dir(root) else {
         return Ok(out);
@@ -973,9 +1467,11 @@ fn read_canonical_agents(root: &Path) -> R<BTreeMap<String, AgentDefinition>> {
         let prompt_path = dir.join("prompt.md");
         if !meta_path.is_file() || !prompt_path.is_file() {
             return Err(format!(
-                "canonical agent {id} must contain agent.toml and prompt.md"
+                "canonical agent `{id}` must contain agent.toml and prompt.md ({})",
+                dir.display()
             ));
         }
+        origins.note(&id, format!("canonical {}", dir.display()));
         let text = fs::read_to_string(&meta_path).map_err(|e| util::ctx(&meta_path, e))?;
         let doc: toml_edit::DocumentMut = text
             .parse()
@@ -1119,28 +1615,76 @@ fn canonical_agent_tree(agent: &AgentDefinition) -> R<Tree> {
     Ok(tree)
 }
 
+/// `Err((agent id, located reason))` — the id lets the caller report which unit
+/// cost the feature, the reason carries the file that has to be edited.
 fn validate_agents(
     agents: &BTreeMap<String, AgentDefinition>,
     skills: &BTreeMap<String, Tree>,
     mcp: &McpMap,
-) -> R<()> {
+    origins: &AgentOrigins,
+) -> Result<(), (String, String)> {
     for (id, agent) in agents {
+        let fail = |reason: String| {
+            Err((
+                id.clone(),
+                format!("{reason}\n      source: {}", origins.describe(id)),
+            ))
+        };
         if id != &agent.id || !valid_agent_id(id) {
-            return Err(format!("invalid canonical agent id `{id}`"));
+            return fail(format!("invalid canonical agent id `{id}`"));
         }
         for skill in &agent.skills {
             if !skills.contains_key(skill) {
-                return Err(format!(
+                return fail(format!(
                     "agent `{id}` references missing canonical skill `{skill}`"
                 ));
             }
         }
         for server in &agent.mcp_servers {
             if !mcp.contains_key(server) {
-                return Err(format!(
+                return fail(format!(
                     "agent `{id}` references missing canonical MCP server `{server}`"
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+/// Every agent must be expressible in every destination before any of them is
+/// written; a definition only one CLI can hold would otherwise be applied
+/// half-way and then rolled back on the next run.
+fn check_agent_translation(
+    active: &[Cli],
+    agents: &BTreeMap<String, AgentDefinition>,
+    project: bool,
+    origins: &AgentOrigins,
+) -> Result<(), (String, String)> {
+    for (id, agent) in agents {
+        for &cli in active {
+            let format = agent_format(cli);
+            if format.is_reserved(id) {
+                continue;
+            }
+            let Err(error) = format.render(agent) else {
+                continue;
+            };
+            let root = if project {
+                paths::project_agents_dir(cli)
+            } else {
+                paths::agents_dir(cli)
+            };
+            let target = native_agent_path(cli, &root, id);
+            return Err((
+                id.clone(),
+                format!(
+                    "agent `{id}` cannot be written as {}: {error}\n      target: {}\n      source: {}\n      fix:    remove the agent from that CLI, or set `agents = false` under [features] in {}",
+                    cli.id(),
+                    target.display(),
+                    origins.describe(id),
+                    paths::store_config().display()
+                ),
+            ));
         }
     }
     Ok(())
@@ -1298,17 +1842,19 @@ fn all_agent_names(
     names
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_operations(
     active: &[Cli],
     canonical_now: &ContentSnapshot,
     endpoint_now: &BTreeMap<Cli, ContentSnapshot>,
     desired: &ContentSnapshot,
-    mcp: bool,
-    instructions: bool,
-    skills: bool,
-    agents: bool,
+    applied: FeatureSet,
 ) -> R<Vec<Operation>> {
+    let FeatureSet {
+        mcp,
+        instructions,
+        skills,
+        agents,
+    } = applied;
     let mut ops = Vec::new();
     if mcp {
         let canonical = Canonical {
@@ -1586,12 +2132,21 @@ pub fn resolve_conflict(id: &str, source: &str) -> R<()> {
     )
 }
 
-fn clear_resolved_conflicts() -> R<()> {
+/// Drop the applied resolutions only. Conflict records themselves are pruned by
+/// `save_conflicts`, which knows which ones are still outstanding — a partial
+/// sync must not delete the record of a conflict it just refused to touch.
+fn clear_resolutions() -> R<()> {
     let Ok(entries) = fs::read_dir(paths::pending_conflicts()) else {
         return Ok(());
     };
     for entry in entries.flatten() {
-        let _ = fs::remove_file(entry.path());
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".resolution.json")
+        {
+            let _ = fs::remove_file(entry.path());
+        }
     }
     Ok(())
 }
@@ -1600,23 +2155,33 @@ fn tree_hash(tree: &Tree) -> String {
     util::fingerprint(&serde_json::to_vec(tree).unwrap_or_default())
 }
 
-fn detect_legacy(active: &[Cli], instructions: bool, skills: bool) -> bool {
-    active.iter().any(|&cli| {
-        (instructions
-            && fs::symlink_metadata(paths::instructions_file(cli))
-                .map(|m| m.file_type().is_symlink())
-                .unwrap_or(false))
-            || (skills
-                && fs::read_dir(paths::skills_dir(cli))
-                    .map(|rd| {
-                        rd.flatten().any(|e| {
-                            fs::symlink_metadata(e.path())
-                                .map(|m| m.file_type().is_symlink())
-                                .unwrap_or(false)
-                        })
-                    })
-                    .unwrap_or(false))
-    })
+/// Every v0.1 symlink still in place, listed rather than counted: a migration
+/// prompt without paths leaves the user to hunt for what it is asking about.
+fn legacy_symlinks(active: &[Cli], instructions: bool, skills: bool) -> Vec<PathBuf> {
+    fn is_symlink(path: &Path) -> bool {
+        fs::symlink_metadata(path)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+    }
+    let mut out = Vec::new();
+    for &cli in active {
+        if instructions {
+            let path = paths::instructions_file(cli);
+            if is_symlink(&path) {
+                out.push(path);
+            }
+        }
+        if skills {
+            if let Ok(entries) = fs::read_dir(paths::skills_dir(cli)) {
+                for entry in entries.flatten() {
+                    if is_symlink(&entry.path()) {
+                        out.push(entry.path());
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 fn is_placeholder(bytes: &[u8]) -> bool {

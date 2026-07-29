@@ -154,6 +154,157 @@ fn custom_agent_import_fanout_delete_and_rollback_are_transactional() {
     assert!(codex.is_file());
 }
 
+/// A field one destination cannot express costs that feature and nothing else:
+/// MCP, skills and instructions still land, and the failure names the file.
+#[test]
+fn untranslatable_agent_skips_only_the_agents_feature() {
+    let sandbox = Sandbox::new("agents-isolated");
+    sandbox.configure("mcp = true\nskills = true\ninstructions = true\nagents = true");
+    sandbox.install_two_clis();
+    fs::create_dir_all(sandbox.home.join(".claude/agents")).unwrap();
+    fs::write(
+        sandbox.home.join(".claude/agents/tooled.md"),
+        "---\nname: tooled\ndescription: Runs commands\ntools: [Bash]\n---\n\nDo work.\n",
+    )
+    .unwrap();
+
+    let result = sandbox.command(&["sync"]);
+    assert!(result.status.success(), "{}", text(&result));
+    let output = text(&result);
+    assert!(output.contains("[skip] agents"), "{output}");
+    assert!(output.contains("tooled"), "{output}");
+    assert!(
+        output.contains(".claude/agents/tooled.md"),
+        "the failure must name its source file: {output}"
+    );
+    assert!(output.contains("target:"), "{output}");
+    assert!(output.contains("Bash=allow"), "{output}");
+
+    let canonical = fs::read_to_string(sandbox.store.join("mcp.json")).unwrap();
+    assert!(canonical.contains("alpha") && canonical.contains("beta"));
+    assert!(sandbox.store.join("skills/demo/SKILL.md").is_file());
+    assert_same(
+        sandbox.home.join(".claude/CLAUDE.md"),
+        sandbox.home.join(".codex/AGENTS.md"),
+    );
+    assert!(!sandbox.store.join("agents/tooled").exists());
+    assert!(!sandbox.home.join(".codex/agents/tooled.toml").exists());
+
+    let status = sandbox.command(&["status"]);
+    assert_eq!(status.status.code(), Some(3), "{}", text(&status));
+    let status_text = text(&status);
+    assert!(status_text.contains("DEGRADED"), "{status_text}");
+    assert!(status_text.contains("not synced: agents"), "{status_text}");
+}
+
+/// The opt-in agent feature must not adopt a file the CLI wrote for itself.
+#[test]
+fn vendor_default_agent_is_never_a_sync_source() {
+    let sandbox = Sandbox::new("agents-vendor-default");
+    fs::write(
+        sandbox.store.join("config.toml"),
+        "scope = \"global\"\nclis = [\"claude\", \"kiro\"]\n[features]\nmcp = false\nskills = false\ninstructions = false\nagents = true\n",
+    )
+    .unwrap();
+    fs::write(sandbox.home.join(".claude.json"), "{}").unwrap();
+    fs::create_dir_all(sandbox.home.join(".kiro/agents")).unwrap();
+    fs::write(
+        sandbox.home.join(".kiro/agents/default.json"),
+        r#"{"name":"q_ide_default","description":"Default agent configuration","prompt":"","tools":["fs_read"],"allowedTools":["fs_read","execute_bash"],"toolsSettings":{"execute_bash":{"alwaysAllow":[{"preset":"readOnly"}]}}}"#,
+    )
+    .unwrap();
+
+    let result = sandbox.command(&["sync"]);
+    assert!(result.status.success(), "{}", text(&result));
+    assert!(!sandbox.store.join("agents/default").exists());
+    assert!(!sandbox.home.join(".claude/agents/default.md").exists());
+    assert!(!text(&result).contains("[skip]"), "{}", text(&result));
+    assert_eq!(sandbox.command(&["status"]).status.code(), Some(0));
+}
+
+/// Divergent MCP edits are no reason to stop writing skills, and vice versa.
+#[test]
+fn conflict_in_one_feature_still_applies_the_others() {
+    let sandbox = Sandbox::new("conflict-isolated");
+    sandbox.configure("mcp = true\nskills = true\ninstructions = true");
+    sandbox.install_two_clis();
+    assert!(sandbox.command(&["sync"]).status.success());
+
+    fs::write(sandbox.home.join(".claude/CLAUDE.md"), "claude choice\n").unwrap();
+    fs::write(sandbox.home.join(".codex/AGENTS.md"), "codex choice\n").unwrap();
+    fs::write(
+        sandbox.home.join(".claude.json"),
+        r#"{"mcpServers":{"alpha":{"command":"alpha","env":{"TOKEN":"one"}},"gamma":{"command":"gamma"}}}"#,
+    )
+    .unwrap();
+
+    let result = sandbox.command(&["sync"]);
+    assert_eq!(result.status.code(), Some(2), "{}", text(&result));
+
+    let canonical = fs::read_to_string(sandbox.store.join("mcp.json")).unwrap();
+    assert!(canonical.contains("gamma"), "{canonical}");
+    assert!(fs::read_to_string(sandbox.home.join(".codex/config.toml"))
+        .unwrap()
+        .contains("gamma"));
+
+    assert_eq!(
+        fs::read_to_string(sandbox.store.join("AGENTS.md")).unwrap(),
+        "shared instructions\n",
+        "the conflicted feature must keep its canonical value"
+    );
+    assert_eq!(
+        fs::read_to_string(sandbox.home.join(".claude/CLAUDE.md")).unwrap(),
+        "claude choice\n"
+    );
+    assert_eq!(
+        fs::read_to_string(sandbox.home.join(".codex/AGENTS.md")).unwrap(),
+        "codex choice\n"
+    );
+
+    // A partial apply must not erase the record of what it refused to touch.
+    let pending: serde_json::Value =
+        serde_json::from_slice(&sandbox.command(&["conflicts", "list", "--json"]).stdout).unwrap();
+    assert_eq!(pending.as_array().map(Vec::len), Some(1), "{pending}");
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_lists_every_blocker_in_one_pass() {
+    use std::os::unix::fs::symlink;
+    let sandbox = Sandbox::new("doctor");
+    sandbox.configure("mcp = false\nskills = false\ninstructions = true\nagents = true");
+    sandbox.install_two_clis();
+    fs::write(sandbox.store.join("AGENTS.md"), "legacy canonical\n").unwrap();
+    fs::remove_file(sandbox.home.join(".claude/CLAUDE.md")).unwrap();
+    symlink(
+        sandbox.store.join("AGENTS.md"),
+        sandbox.home.join(".claude/CLAUDE.md"),
+    )
+    .unwrap();
+    fs::create_dir_all(sandbox.home.join(".claude/agents")).unwrap();
+    fs::write(
+        sandbox.home.join(".claude/agents/tooled.md"),
+        "---\nname: tooled\ndescription: Runs commands\ntools: [Bash]\n---\n\nDo work.\n",
+    )
+    .unwrap();
+
+    let doctor = sandbox.command(&["doctor"]);
+    assert_eq!(doctor.status.code(), Some(3), "{}", text(&doctor));
+    let output = text(&doctor);
+    // Three unrelated blockers, all surfaced by one command.
+    assert!(output.contains("Blockers: 3"), "{output}");
+    assert!(output.contains("[migration]"), "{output}");
+    assert!(output.contains("[translate] agents/tooled"), "{output}");
+    assert!(
+        output.contains("[conflict] instructions/global"),
+        "{output}"
+    );
+    assert!(
+        output.contains("no sync has been recorded yet"),
+        "health must not be implied from the filesystem: {output}"
+    );
+}
+
 #[test]
 fn project_agents_use_independent_canonical_and_native_paths() {
     let sandbox = Sandbox::new("agents-project");

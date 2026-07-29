@@ -6,6 +6,7 @@ mod agents;
 mod config;
 mod configure;
 mod engine;
+mod health;
 mod model;
 mod mount;
 mod paths;
@@ -19,10 +20,13 @@ use util::R;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Exit codes: 0 healthy, 1 error, 2 unresolved conflicts, 3 degraded health.
+const EXIT_DEGRADED: i32 = 3;
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match dispatch(&args) {
-        Ok(()) => 0,
+        Ok(code) => code,
         Err(e) => {
             eprintln!("cli-switch: error: {e}");
             if e == "unresolved conflicts" {
@@ -35,28 +39,29 @@ fn main() {
     std::process::exit(code);
 }
 
-fn dispatch(args: &[String]) -> R<()> {
+fn dispatch(args: &[String]) -> R<i32> {
     let (cmd, rest) = match args.first().map(|s| s.as_str()) {
         None => ("configure", &args[0..]),
         Some("-h" | "--help" | "-V" | "--version") => (args[0].as_str(), &args[1..]),
         Some(first) => (first, &args[1..]),
     };
     match cmd {
-        "sync" => cmd_sync(rest),
+        "sync" => cmd_sync(rest).map(|()| 0),
         "status" => cmd_status(),
-        "mount" => cmd_mount(rest),
-        "conflicts" => cmd_conflicts(rest),
-        "rollback" => cmd_rollback(rest),
-        "hook" => cmd_hook(rest),
-        "configure" | "config" => configure::run(rest),
-        "init" => cmd_init(),
+        "doctor" => cmd_doctor(),
+        "mount" => cmd_mount(rest).map(|()| 0),
+        "conflicts" => cmd_conflicts(rest).map(|()| 0),
+        "rollback" => cmd_rollback(rest).map(|()| 0),
+        "hook" => cmd_hook(rest).map(|()| 0),
+        "configure" | "config" => configure::run(rest).map(|()| 0),
+        "init" => cmd_init().map(|()| 0),
         "-V" | "--version" | "version" => {
             println!("cli-switch {VERSION}");
-            Ok(())
+            Ok(0)
         }
         "-h" | "--help" | "help" => {
             print_help();
-            Ok(())
+            Ok(0)
         }
         other => Err(format!("unknown command '{other}' (try `cli-switch help`)")),
     }
@@ -153,8 +158,33 @@ fn cmd_hook(args: &[String]) -> R<()> {
         migrate: false,
     }) {
         Ok(()) => {
-            if json_output {
-                println!("{{\"ok\":true}}");
+            // A run that skipped a feature is not a clean run. Saying `ok` here
+            // is how a broken sync stays invisible for weeks.
+            let degraded = health::load()?.filter(|last| !last.result.healthy());
+            match (degraded, json_output) {
+                (None, true) => println!("{{\"ok\":true}}"),
+                (None, false) => {}
+                (Some(last), true) => println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "ok": true,
+                        "degraded": true,
+                        "result": last.result.label(),
+                        "message": "cli-switch applied what it could; the listed features were left untouched. Run `cli-switch doctor` for the full list.",
+                        "skipped": last.skipped,
+                    }))
+                    .map_err(|e| e.to_string())?
+                ),
+                (Some(last), false) => {
+                    eprintln!(
+                        "cli-switch: last sync {} — {} feature(s) were left untouched:",
+                        last.result.label(),
+                        last.skipped.len()
+                    );
+                    for note in &last.skipped {
+                        eprintln!("  - {}: {}", note.feature, note.reason);
+                    }
+                }
             }
             Ok(())
         }
@@ -238,17 +268,100 @@ fn cmd_mount(args: &[String]) -> R<()> {
     Ok(())
 }
 
-fn cmd_status() -> R<()> {
+fn cmd_status() -> R<i32> {
     print_status()
 }
 
-pub(crate) fn print_status() -> R<()> {
+/// Everything that stands between the current state and a clean sync, in one
+/// list. The point is that fixing one blocker should not be the only way to
+/// discover the next one.
+fn cmd_doctor() -> R<i32> {
+    let cfg = config::load()?;
+    let active = config::active_clis(&cfg);
+    let want = engine::FeatureSet {
+        mcp: cfg.mcp,
+        instructions: cfg.instructions,
+        skills: cfg.skills,
+        agents: cfg.agents,
+    };
+    println!("cli-switch {VERSION} doctor");
+    println!("store: {}", paths::store_root().display());
+    println!(
+        "clis:  {}",
+        cli_list(&active).unwrap_or_else(|| "none installed".to_string())
+    );
+    println!();
+    print_health(&health::load()?);
+    println!();
+
+    let healthy = health::load()?.map(|l| l.result.healthy()).unwrap_or(false);
+    let blockers = engine::preflight(&active, want, true)?;
+    if blockers.is_empty() {
+        println!("Blockers: none — the next `cli-switch sync` has nothing in its way.");
+        // Exit 0 from `status` or `doctor` means the same thing everywhere:
+        // the last sync succeeded and nothing stands in the next one's way.
+        return Ok(if healthy { 0 } else { EXIT_DEGRADED });
+    }
+    println!("Blockers: {}", blockers.len());
+    for (index, blocker) in blockers.iter().enumerate() {
+        let scope = match (&blocker.feature, &blocker.unit) {
+            (Some(feature), Some(unit)) => format!("{}/{unit}", feature.id()),
+            (Some(feature), None) => feature.id().to_string(),
+            (None, _) => "-".to_string(),
+        };
+        println!(
+            "{:>3}. [{}] {scope}\n     {}",
+            index + 1,
+            blocker.code,
+            blocker.detail
+        );
+    }
+    Ok(EXIT_DEGRADED)
+}
+
+/// The one thing a health check must never do is report the shape of the
+/// filesystem while implying it reported the outcome of the last sync.
+fn print_health(last: &Option<health::LastSync>) {
+    let Some(last) = last else {
+        println!("health: UNKNOWN — no sync has been recorded yet");
+        println!("last sync: never (run `cli-switch sync`)");
+        return;
+    };
+    println!(
+        "health: {}",
+        if last.result.healthy() {
+            "OK".to_string()
+        } else {
+            format!("DEGRADED — last sync {}", last.result.label())
+        }
+    );
+    println!(
+        "last sync: {} at {} ({}), {} item(s) applied",
+        last.result.label(),
+        health::format_epoch_ms(last.finished_ms),
+        health::format_age(last.finished_ms),
+        last.applied
+    );
+    if let Some(error) = &last.error {
+        println!("  error: {error}");
+    }
+    for note in &last.skipped {
+        match &note.unit {
+            Some(unit) => println!("  not synced: {} ({unit}) — {}", note.feature, note.reason),
+            None => println!("  not synced: {} — {}", note.feature, note.reason),
+        }
+    }
+}
+
+pub(crate) fn print_status() -> R<i32> {
     let cfg = config::load()?;
     let project_cfg = config::load_project()?;
     let setup_clis = config::load_setup()?;
+    let last = health::load()?;
 
     println!("cli-switch {VERSION}");
     println!("store: {}", paths::store_root().display());
+    print_health(&last);
     let pending = engine::list_conflicts()?.len();
     println!("pending conflicts: {pending}");
     println!(
@@ -278,14 +391,23 @@ pub(crate) fn print_status() -> R<()> {
     println!();
     println!("Project sync");
     match project_cfg {
-        Some(project_cfg) => status_project(&project_cfg),
+        Some(project_cfg) => status_project(&project_cfg)?,
         None => {
             println!("project: {}", paths::project_root().display());
             println!("state: not joined");
             println!("Run `cli-switch` and choose `3) set project level` to join.");
-            Ok(())
         }
     }
+
+    let healthy = last.map(|l| l.result.healthy()).unwrap_or(false);
+    if !healthy {
+        println!();
+        println!("The table above compares the current on-disk targets with the canonical store.");
+        println!(
+            "It is not the result of the last sync — see `health` above, or run `cli-switch doctor`."
+        );
+    }
+    Ok(if healthy { 0 } else { EXIT_DEGRADED })
 }
 
 fn status_global(cfg: &config::Config) -> R<()> {
@@ -694,7 +816,8 @@ COMMANDS:
     conflicts       List/show/resolve fail-closed synchronization conflicts
     rollback <id>   Restore every path changed by a transaction
     hook             Safe startup entrypoint; emits masked conflict context
-    status          Show sync health, conflicts, transactions, and hook tiers
+    status          Show last-sync health, conflicts, transactions, and hook tiers
+    doctor          List every blocker standing between now and a clean sync
     mount [clis…]   Install startup hooks so each CLI syncs on launch
     help            This message
 
