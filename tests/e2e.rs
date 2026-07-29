@@ -173,8 +173,11 @@ fn untranslatable_agent_skips_only_the_agents_feature() {
     let output = text(&result);
     assert!(output.contains("[skip] agents"), "{output}");
     assert!(output.contains("tooled"), "{output}");
+    // Reported paths are native, so compare separator-independently.
     assert!(
-        output.contains(".claude/agents/tooled.md"),
+        output
+            .replace('\\', "/")
+            .contains(".claude/agents/tooled.md"),
         "the failure must name its source file: {output}"
     );
     assert!(output.contains("target:"), "{output}");
