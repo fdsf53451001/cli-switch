@@ -28,6 +28,8 @@ fn exe_path() -> String {
 }
 
 pub fn mount(clis: &[Cli]) -> R<MountReport> {
+    let _lock = util::acquire_lock(&paths::store_root().join(".lock"), 120)?
+        .ok_or("another cli-switch operation is in progress")?;
     let exe = exe_path();
     let mut lines = Vec::new();
 
@@ -46,6 +48,8 @@ pub fn mount(clis: &[Cli]) -> R<MountReport> {
 }
 
 pub fn unmount(clis: &[Cli]) -> R<MountReport> {
+    let _lock = util::acquire_lock(&paths::store_root().join(".lock"), 120)?
+        .ok_or("another cli-switch operation is in progress")?;
     let mut lines = Vec::new();
 
     for &cli in clis {

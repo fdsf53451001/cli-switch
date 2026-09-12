@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub type R<T> = Result<T, String>;
 
@@ -14,6 +14,14 @@ pub fn ctx<E: std::fmt::Display>(path: &Path, e: E) -> String {
 pub fn read_to_string_opt(path: &Path) -> R<Option<String>> {
     match fs::read_to_string(path) {
         Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(ctx(path, e)),
+    }
+}
+
+pub fn read_bytes_opt(path: &Path) -> R<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(ctx(path, e)),
     }
@@ -59,19 +67,23 @@ pub fn write_atomic_bytes(path: &Path, contents: &[u8]) -> R<()> {
     ensure_parent(path)?;
     let tmp = path.with_extension(format!("{}.{}", tmp_ext(path), std::process::id()));
     let _ = fs::remove_file(&tmp);
-    if let Err(e) = fs::write(&tmp, contents) {
-        let _ = fs::remove_file(&tmp);
-        return Err(ctx(&tmp, e));
-    }
-    match fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(first) if path.exists() => {
-            fs::remove_file(path).map_err(|e| ctx(path, e))?;
-            fs::rename(&tmp, path)
-                .map_err(|e| format!("{} (initial replace error: {first})", ctx(path, e)))
+    let result = (|| {
+        fs::write(&tmp, contents).map_err(|e| ctx(&tmp, e))?;
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&tmp)
+            .and_then(|file| file.sync_all())
+            .map_err(|e| ctx(&tmp, e))?;
+        if let Ok(meta) = fs::metadata(path) {
+            fs::set_permissions(&tmp, meta.permissions()).map_err(|e| ctx(&tmp, e))?;
         }
-        Err(e) => Err(ctx(path, e)),
+        // A failed replacement must leave the original destination intact.
+        fs::rename(&tmp, path).map_err(|e| ctx(path, e))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
     }
+    result
 }
 
 pub fn now_millis() -> u128 {
@@ -175,68 +187,26 @@ pub mod base64_bytes {
     }
 }
 
-/// A best-effort exclusive lock so concurrent startup-hook syncs don't collide.
-/// Held for the process lifetime; removed on drop.
+/// OS-held lock: released when the handle closes or the process exits.
+/// The inode must remain in place; unlinking it would allow competing locks.
 pub struct Lock {
-    path: PathBuf,
+    _file: fs::File,
 }
 
-impl Drop for Lock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-/// Try to acquire the lock. Returns `None` if another fresh run holds it.
-/// A lock older than `stale_secs` is considered abandoned and stolen.
-pub fn acquire_lock(path: &Path, stale_secs: u64) -> R<Option<Lock>> {
+pub fn acquire_lock(path: &Path, _stale_secs: u64) -> R<Option<Lock>> {
     ensure_parent(path)?;
-    match fs::OpenOptions::new()
+    let file = fs::OpenOptions::new()
+        .read(true)
         .write(true)
-        .create_new(true)
+        .create(true)
+        .truncate(false)
         .open(path)
-    {
-        Ok(_) => Ok(Some(Lock {
-            path: path.to_path_buf(),
-        })),
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-            let age = now_secs().saturating_sub(mtime_secs(path));
-            if age > stale_secs {
-                let _ = fs::remove_file(path);
-                match fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(path)
-                {
-                    Ok(_) => Ok(Some(Lock {
-                        path: path.to_path_buf(),
-                    })),
-                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(None),
-                    Err(e) => Err(ctx(path, e)),
-                }
-            } else {
-                Ok(None)
-            }
-        }
-        Err(e) => Err(ctx(path, e)),
+        .map_err(|e| ctx(path, e))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(Lock { _file: file })),
+        Err(fs::TryLockError::WouldBlock) => Ok(None),
+        Err(fs::TryLockError::Error(e)) => Err(ctx(path, e)),
     }
-}
-
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-/// File modification time as seconds since epoch (0 if unavailable).
-pub fn mtime_secs(path: &Path) -> u64 {
-    fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

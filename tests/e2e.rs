@@ -37,6 +37,10 @@ impl Sandbox {
     }
 
     fn command_with_env(&self, args: &[&str], extra: Option<(&str, &str)>) -> Output {
+        self.command_with_envs(args, &extra.into_iter().collect::<Vec<_>>())
+    }
+
+    fn command_with_envs(&self, args: &[&str], extra: &[(&str, &str)]) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_cli-switch"));
         command
             .args(args)
@@ -45,7 +49,7 @@ impl Sandbox {
             .env("CLI_SWITCH_HOME", &self.store)
             .env("PATH", "")
             .current_dir(&self.project);
-        if let Some((key, value)) = extra {
+        for (key, value) in extra {
             command.env(key, value);
         }
         command.output().unwrap()
@@ -292,7 +296,7 @@ fn doctor_lists_every_blocker_in_one_pass() {
     .unwrap();
 
     let doctor = sandbox.command(&["doctor"]);
-    assert_eq!(doctor.status.code(), Some(3), "{}", text(&doctor));
+    assert_eq!(doctor.status.code(), Some(2), "{}", text(&doctor));
     let output = text(&doctor);
     // Three unrelated blockers, all surfaced by one command.
     assert!(output.contains("Blockers: 3"), "{output}");
@@ -568,48 +572,46 @@ fn configure_project(sandbox: &Sandbox, features: &str) {
 
 #[cfg(unix)]
 #[test]
-fn project_link_existing_claude_md_file_is_merged_into_agents_then_symlinked() {
-    let sandbox = Sandbox::new("project-merge");
-    sandbox.install_two_clis();
+fn project_contradictory_instructions_with_shared_heading_are_never_merged() {
+    let sandbox = Sandbox::new("project-contradiction");
     configure_project(
         &sandbox,
         "mcp = false\nskills = false\ninstructions = true\nagents = false",
     );
-    fs::write(
-        sandbox.project.join("AGENTS.md"),
-        "# Shared\n\nLine only in AGENTS.md.\n",
-    )
-    .unwrap();
-    fs::write(
-        sandbox.project.join("CLAUDE.md"),
-        "# Shared\n\nLine only in CLAUDE.md.\n",
-    )
-    .unwrap();
-
-    let result = sandbox.command(&["sync"]);
-    assert!(result.status.success(), "{}", text(&result));
-
-    // CLAUDE.md is now a symlink to AGENTS.md.
-    let claude_meta = fs::symlink_metadata(sandbox.project.join("CLAUDE.md")).unwrap();
-    assert!(
-        claude_meta.file_type().is_symlink(),
-        "CLAUDE.md should be a symlink after merge"
-    );
-    // Both paths resolve to the same file.
+    let original = "# Rules\nAlways run tests.\n";
+    let native = "# Rules\nNever run tests.\n";
+    fs::write(sandbox.project.join("AGENTS.md"), original).unwrap();
+    fs::write(sandbox.project.join("CLAUDE.md"), native).unwrap();
+    let result = sandbox.command(&["sync", "--quiet"]);
+    assert_eq!(result.status.code(), Some(2), "{}", text(&result));
     assert_eq!(
-        fs::canonicalize(sandbox.project.join("CLAUDE.md")).unwrap(),
-        fs::canonicalize(sandbox.project.join("AGENTS.md")).unwrap(),
+        fs::read_to_string(sandbox.project.join("AGENTS.md")).unwrap(),
+        original
     );
-
-    let merged = fs::read_to_string(sandbox.project.join("AGENTS.md")).unwrap();
-    assert!(merged.contains("Line only in AGENTS.md."));
-    assert!(merged.contains("Line only in CLAUDE.md."));
     assert_eq!(
-        merged.matches("# Shared").count(),
-        1,
-        "shared anchor duplicated"
+        fs::read_to_string(sandbox.project.join("CLAUDE.md")).unwrap(),
+        native
     );
-    assert!(text(&result).contains("merged existing"));
+    assert!(!fs::symlink_metadata(sandbox.project.join("CLAUDE.md"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(!sandbox.project.join(".gitignore").exists());
+    let health: serde_json::Value =
+        serde_json::from_slice(&fs::read(sandbox.store.join("state/last-sync.json")).unwrap())
+            .unwrap();
+    assert_eq!(health["result"], "conflicts");
+    assert_eq!(health["conflicts"], 1);
+    assert_eq!(health["applied"], 0);
+    assert_eq!(sandbox.command(&["status"]).status.code(), Some(2));
+    let doctor = sandbox.command(&["doctor"]);
+    assert_eq!(doctor.status.code(), Some(2));
+    assert!(text(&doctor).contains("cannot be auto-merged"));
+    let hook = sandbox.command(&["hook", "--json"]);
+    assert!(hook.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&hook.stdout).unwrap();
+    assert_eq!(value["requires_user"], true);
+    assert!(!value["project_conflicts"].as_array().unwrap().is_empty());
 }
 
 #[cfg(unix)]
@@ -633,7 +635,7 @@ fn project_link_claude_md_with_no_common_anchor_is_reported_as_conflict() {
     .unwrap();
 
     let result = sandbox.command(&["sync"]);
-    assert!(result.status.success(), "{}", text(&result));
+    assert_eq!(result.status.code(), Some(2), "{}", text(&result));
     assert!(
         !fs::symlink_metadata(sandbox.project.join("CLAUDE.md"))
             .unwrap()
@@ -787,4 +789,263 @@ fn project_sync_adds_kiro_to_gitignore_when_kiro_enabled() {
     assert!(gi2.contains(".claude/"));
     assert!(gi2.contains(".kiro/"));
     assert!(gi2.contains(".cli-switch/"));
+}
+
+#[cfg(unix)]
+#[test]
+fn project_preflight_failure_leaves_all_files_unchanged() {
+    let sandbox = Sandbox::new("project-preflight");
+    configure_project(
+        &sandbox,
+        "skills = true\ninstructions = true\nagents = false",
+    );
+    fs::write(sandbox.project.join("AGENTS.md"), "identical\n").unwrap();
+    fs::write(sandbox.project.join("CLAUDE.md"), "identical\n").unwrap();
+    fs::write(sandbox.project.join(".claude"), "not a directory").unwrap();
+    let result = sandbox.command(&["sync"]);
+    assert_eq!(result.status.code(), Some(1), "{}", text(&result));
+    assert_eq!(
+        fs::read_to_string(sandbox.project.join("AGENTS.md")).unwrap(),
+        "identical\n"
+    );
+    assert!(fs::symlink_metadata(sandbox.project.join("CLAUDE.md"))
+        .unwrap()
+        .is_file());
+    assert!(!sandbox.project.join(".agents").exists());
+    assert!(!sandbox.project.join(".gitignore").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn project_write_failure_restores_original_native_file() {
+    let sandbox = Sandbox::new("project-rollback");
+    configure_project(
+        &sandbox,
+        "skills = false\ninstructions = true\nagents = false",
+    );
+    fs::write(sandbox.project.join("AGENTS.md"), "identical\n").unwrap();
+    fs::write(sandbox.project.join("CLAUDE.md"), "identical\n").unwrap();
+    let result = sandbox.command_with_env(&["sync"], Some(("CLI_SWITCH_TEST_FAIL_AFTER", "1")));
+    assert_eq!(result.status.code(), Some(1), "{}", text(&result));
+    assert!(text(&result).contains("was rolled back"));
+    assert!(fs::symlink_metadata(sandbox.project.join("CLAUDE.md"))
+        .unwrap()
+        .is_file());
+    assert_eq!(
+        fs::read_to_string(sandbox.project.join("CLAUDE.md")).unwrap(),
+        "identical\n"
+    );
+    assert!(!sandbox.project.join(".gitignore").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn project_transaction_can_be_explicitly_rolled_back() {
+    let sandbox = Sandbox::new("project-explicit-rollback");
+    configure_project(
+        &sandbox,
+        "skills = false\ninstructions = true\nagents = false",
+    );
+    fs::write(sandbox.project.join("AGENTS.md"), "identical\n").unwrap();
+    fs::write(sandbox.project.join("CLAUDE.md"), "identical\n").unwrap();
+    let result = sandbox.command(&["sync"]);
+    assert!(result.status.success(), "{}", text(&result));
+    let health: serde_json::Value =
+        serde_json::from_slice(&fs::read(sandbox.store.join("state/last-sync.json")).unwrap())
+            .unwrap();
+    assert_eq!(health["applied"], 2);
+    let id = health["transaction"].as_str().unwrap();
+    let rollback = sandbox.command(&["rollback", id]);
+    assert!(rollback.status.success(), "{}", text(&rollback));
+    assert!(fs::symlink_metadata(sandbox.project.join("CLAUDE.md"))
+        .unwrap()
+        .is_file());
+    assert_eq!(
+        fs::read_to_string(sandbox.project.join("CLAUDE.md")).unwrap(),
+        "identical\n"
+    );
+    assert!(!sandbox.project.join(".gitignore").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_recovery_is_reported_and_original_journal_is_retained() {
+    let sandbox = Sandbox::new("recovery-failure");
+    configure_project(
+        &sandbox,
+        "skills = false\ninstructions = true\nagents = false",
+    );
+    fs::write(sandbox.project.join("AGENTS.md"), "original\n").unwrap();
+    fs::write(sandbox.project.join("CLAUDE.md"), "original\n").unwrap();
+    let result = sandbox.command_with_envs(
+        &["sync"],
+        &[
+            ("CLI_SWITCH_TEST_FAIL_AFTER", "1"),
+            ("CLI_SWITCH_TEST_FAIL_RESTORE", "1"),
+        ],
+    );
+    assert_eq!(result.status.code(), Some(1));
+    let output = text(&result);
+    assert!(output.contains("recovery incomplete"), "{output}");
+    assert!(!output.contains("was rolled back"));
+    let dirs: Vec<_> = fs::read_dir(sandbox.store.join("state/transactions"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(dirs.len(), 1);
+    let journal = &dirs[0];
+    let original: serde_json::Value =
+        serde_json::from_slice(&fs::read(journal.join("journal.json")).unwrap()).unwrap();
+    assert_eq!(original["entries"][0]["before"]["kind"], "file");
+    assert!(!journal.join("committed").exists());
+    assert!(!journal.join("rolled-back").exists());
+    // Subsequent successful syncs must not prune an incomplete recovery.
+    for i in 0..12 {
+        fs::write(
+            sandbox.project.join(".gitignore"),
+            format!("# revision {i}\n"),
+        )
+        .unwrap();
+        let next = sandbox.command(&["sync"]);
+        assert!(next.status.success(), "{}", text(&next));
+    }
+    assert!(journal.join("journal.json").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn project_adopts_one_native_file_without_placeholder_pollution() {
+    let sandbox = Sandbox::new("project-adopt");
+    configure_project(
+        &sandbox,
+        "skills = false\ninstructions = true\nagents = false",
+    );
+    fs::write(
+        sandbox.project.join("CLAUDE.md"),
+        "# Native instructions\nKeep this intact.\n",
+    )
+    .unwrap();
+    let dry = sandbox.command(&["sync", "--dry-run"]);
+    assert!(dry.status.success(), "{}", text(&dry));
+    assert!(!sandbox.project.join("AGENTS.md").exists());
+    assert!(!sandbox.store.exists() || !sandbox.store.join("state").exists());
+    let result = sandbox.command(&["sync"]);
+    assert!(result.status.success(), "{}", text(&result));
+    assert_eq!(
+        fs::read_to_string(sandbox.project.join("AGENTS.md")).unwrap(),
+        "# Native instructions\nKeep this intact.\n"
+    );
+}
+
+#[test]
+fn disabled_project_mappings_create_no_instruction_or_skill_files() {
+    let sandbox = Sandbox::new("project-disabled");
+    configure_project(
+        &sandbox,
+        "skills = false\ninstructions = false\nagents = false",
+    );
+    assert!(sandbox.command(&["sync"]).status.success());
+    assert!(!sandbox.project.join("AGENTS.md").exists());
+    assert!(!sandbox.project.join(".agents").exists());
+    assert!(!sandbox.project.join(".gitignore").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn unrelated_broken_symlink_is_not_retargeted() {
+    let sandbox = Sandbox::new("project-foreign-link");
+    configure_project(
+        &sandbox,
+        "skills = false\ninstructions = true\nagents = false",
+    );
+    std::os::unix::fs::symlink("other-missing.md", sandbox.project.join("CLAUDE.md")).unwrap();
+    let result = sandbox.command(&["sync"]);
+    assert_eq!(result.status.code(), Some(2));
+    assert_eq!(
+        fs::read_link(sandbox.project.join("CLAUDE.md")).unwrap(),
+        PathBuf::from("other-missing.md")
+    );
+    assert!(!sandbox.project.join("AGENTS.md").exists());
+}
+
+#[test]
+fn sync_and_rollback_respect_a_live_process_lock() {
+    let sandbox = Sandbox::new("live-lock");
+    let lock_path = sandbox.store.join(".lock");
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    file.lock().unwrap();
+    let old = SystemTime::now() - std::time::Duration::from_secs(3600);
+    file.set_times(fs::FileTimes::new().set_modified(old))
+        .unwrap();
+    let result = sandbox.command(&["sync"]);
+    assert!(result.status.success(), "{}", text(&result));
+    assert!(text(&result).contains("in progress"));
+    assert!(!sandbox.store.join("state/last-sync.json").exists());
+    let rollback = sandbox.command(&["rollback", "any-id"]);
+    assert_eq!(rollback.status.code(), Some(1));
+    assert!(text(&rollback).contains("in progress"));
+    drop(file);
+    assert!(sandbox.command(&["sync"]).status.success());
+    assert!(lock_path.exists());
+}
+
+#[test]
+fn unreadable_instruction_is_not_propagated_as_a_deletion() {
+    let sandbox = Sandbox::new("unreadable-instruction");
+    sandbox.configure("mcp = true\nskills = false\ninstructions = true");
+    sandbox.install_two_clis();
+    let first = sandbox.command(&["sync"]);
+    assert!(first.status.success(), "{}", text(&first));
+    let canonical = fs::read(sandbox.store.join("AGENTS.md")).unwrap();
+    let path = sandbox.home.join(".claude/CLAUDE.md");
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    fs::write(path.join("keep"), "do not delete").unwrap();
+    let next = sandbox.command(&["sync"]);
+    assert!(next.status.success(), "{}", text(&next));
+    assert!(text(&next).contains("instructions"));
+    assert_eq!(
+        fs::read(sandbox.store.join("AGENTS.md")).unwrap(),
+        canonical
+    );
+    assert_eq!(
+        fs::read(sandbox.home.join(".codex/AGENTS.md")).unwrap(),
+        canonical
+    );
+    assert_eq!(fs::read(path.join("keep")).unwrap(), b"do not delete");
+    let health: serde_json::Value =
+        serde_json::from_slice(&fs::read(sandbox.store.join("state/last-sync.json")).unwrap())
+            .unwrap();
+    assert_eq!(health["result"], "degraded");
+}
+
+#[test]
+fn project_failure_keeps_the_record_of_an_already_committed_global_sync() {
+    let sandbox = Sandbox::new("partial-scope-report");
+    sandbox.configure("mcp = true\nskills = false\ninstructions = false");
+    sandbox.install_two_clis();
+    configure_project(
+        &sandbox,
+        "skills = true\ninstructions = false\nagents = false",
+    );
+    fs::write(sandbox.project.join(".claude"), "not a directory").unwrap();
+    let result = sandbox.command(&["sync"]);
+    assert_eq!(result.status.code(), Some(1));
+    let health: serde_json::Value =
+        serde_json::from_slice(&fs::read(sandbox.store.join("state/last-sync.json")).unwrap())
+            .unwrap();
+    assert_eq!(health["result"], "failed");
+    assert!(health["applied"].as_u64().unwrap() > 0);
+    assert!(sandbox
+        .store
+        .join("state/transactions")
+        .join(health["transaction"].as_str().unwrap())
+        .join("journal.json")
+        .exists());
 }

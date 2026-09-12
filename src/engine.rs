@@ -117,7 +117,7 @@ struct Resolution {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "content", rename_all = "lowercase")]
-enum Node {
+pub(crate) enum Node {
     Absent,
     File(#[serde(with = "util::base64_bytes")] Vec<u8>),
     Dir(Tree),
@@ -139,10 +139,144 @@ struct Journal {
 }
 
 #[derive(Debug, Clone)]
-struct Operation {
-    path: PathBuf,
-    after: Node,
-    label: String,
+pub(crate) struct Operation {
+    pub path: PathBuf,
+    pub after: Node,
+    pub label: String,
+}
+
+/// Raw source observations keep edits made while a plan is being built from
+/// being mistaken for the baseline of that plan. Read errors remain errors and
+/// are compared too; feature analysis remains responsible for reporting them.
+pub(crate) struct InputGuard(Vec<(PathBuf, BTreeMap<PathBuf, R<String>>)>);
+impl InputGuard {
+    pub(crate) fn capture(paths: Vec<PathBuf>) -> Self {
+        Self(
+            paths
+                .into_iter()
+                .map(|path| {
+                    let value = input_snapshot(&path);
+                    (path, value)
+                })
+                .collect(),
+        )
+    }
+    fn check(&self) -> R<()> {
+        for (path, expected) in &self.0 {
+            if &input_snapshot(path) != expected {
+                return Err(format!(
+                    "{} changed while planning; rerun sync",
+                    path.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Observe link identity AND linked content without requiring a directory to
+/// be a portable skill tree. One unsupported link must not disable checking
+/// the other files in a CLI's skills directory.
+fn input_snapshot(root: &Path) -> BTreeMap<PathBuf, R<String>> {
+    fn visit(path: &Path, out: &mut BTreeMap<PathBuf, R<String>>) {
+        if out.contains_key(path) {
+            return;
+        }
+        out.insert(path.to_path_buf(), Ok("visiting".into()));
+        let result = (|| {
+            let meta = match fs::symlink_metadata(path) {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok("absent".into()),
+                Err(e) => return Err(util::ctx(path, e)),
+            };
+            if meta.file_type().is_symlink() {
+                let target = fs::read_link(path).map_err(|e| util::ctx(path, e))?;
+                if let Ok(resolved) = fs::canonicalize(path) {
+                    visit(&resolved, out);
+                }
+                return Ok(format!("link:{target:?}"));
+            }
+            if meta.is_dir() {
+                let mut names = fs::read_dir(path)
+                    .map_err(|e| util::ctx(path, e))?
+                    .map(|entry| entry.map(|e| e.file_name()))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| util::ctx(path, e))?;
+                names.retain(|name| name != ".git" && name != ".system");
+                names.sort();
+                for name in &names {
+                    visit(&path.join(name), out);
+                }
+                return Ok(format!("directory:{names:?}"));
+            }
+            let bytes = fs::read(path).map_err(|e| util::ctx(path, e))?;
+            #[cfg(unix)]
+            let permissions = {
+                use std::os::unix::fs::PermissionsExt;
+                meta.permissions().mode()
+            };
+            #[cfg(not(unix))]
+            let permissions = u32::from(meta.permissions().readonly());
+            Ok(format!("file:{}:{permissions}", util::fingerprint(&bytes)))
+        })();
+        out.insert(path.to_path_buf(), result);
+    }
+    let mut out = BTreeMap::new();
+    visit(root, &mut out);
+    out
+}
+
+fn global_inputs(active: &[Cli], want: FeatureSet) -> Vec<PathBuf> {
+    let mut inputs = vec![paths::state_v2(), paths::store_config()];
+    if want.mcp {
+        inputs.push(paths::store_mcp());
+    }
+    if want.instructions {
+        inputs.push(paths::store_instructions());
+    }
+    if want.skills {
+        inputs.push(paths::store_skills());
+    }
+    if want.agents {
+        inputs.push(paths::store_agents());
+    }
+    for &cli in active {
+        if want.mcp {
+            inputs.push(paths::mcp_config(cli));
+        }
+        if want.instructions {
+            inputs.push(paths::instructions_file(cli));
+        }
+        if want.skills {
+            inputs.push(paths::skills_dir(cli));
+        }
+        if want.agents {
+            inputs.push(paths::agents_dir(cli));
+        }
+    }
+    inputs
+}
+
+pub(crate) fn check_destination(path: &Path) -> R<()> {
+    read_node(path)?;
+    for parent in path.ancestors().skip(1) {
+        match fs::metadata(parent) {
+            Ok(meta) if !meta.is_dir() => {
+                return Err(format!("{} is not a directory", parent.display()))
+            }
+            Ok(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(util::ctx(parent, e)),
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn apply_project_operations(ops: &[Operation], guard: &InputGuard) -> R<String> {
+    let id = transaction_id();
+    apply_transaction_with_id(ops, &id, Some(guard))?;
+    retain_transactions(10)?;
+    Ok(id)
 }
 
 pub struct Options {
@@ -323,6 +457,14 @@ pub fn last_transaction() -> R<Option<String>> {
 /// journal, so `cli-switch rollback` covers them.
 pub fn run_project_agents(active: &[Cli], opts: &Options) -> R<Outcome> {
     let state_path = paths::project_config_dir().join("agent-sync-state-v1.json");
+    let mut inputs = vec![
+        state_path.clone(),
+        paths::project_agents(),
+        paths::store_mcp(),
+        paths::project_root().join(".agents/skills"),
+    ];
+    inputs.extend(active.iter().map(|&cli| paths::project_agents_dir(cli)));
+    let guard = InputGuard::capture(inputs);
     let state: AgentScopeState = match util::read_to_string_opt(&state_path)? {
         Some(text) if !text.trim().is_empty() => {
             serde_json::from_str(&text).map_err(|e| util::ctx(&state_path, e))?
@@ -491,7 +633,7 @@ pub fn run_project_agents(active: &[Cli], opts: &Options) -> R<Outcome> {
         });
     }
     let id = transaction_id();
-    apply_transaction_with_id(&operations, &id)?;
+    apply_transaction_with_id(&operations, &id, Some(&guard))?;
     clear_resolutions()?;
     retain_transactions(10)?;
     Ok(Outcome {
@@ -552,7 +694,10 @@ fn analyze(active: &[Cli], want: FeatureSet, prune: bool) -> R<Analysis> {
             format!("canonical MCP store unreadable: {error}"),
         ),
     }
-    canonical_now.instructions = fs::read(paths::store_instructions()).ok();
+    match util::read_bytes_opt(&paths::store_instructions()) {
+        Ok(value) => canonical_now.instructions = value,
+        Err(error) => degrade.feature("source", Feature::Instructions, None, error),
+    }
     match read_skills(&paths::store_skills()) {
         Ok(skills) => canonical_now.skills = skills,
         Err(error) => degrade.feature(
@@ -588,7 +733,10 @@ fn analyze(active: &[Cli], want: FeatureSet, prune: bool) -> R<Analysis> {
                 ),
             ),
         }
-        snapshot.instructions = fs::read(paths::instructions_file(cli)).ok();
+        match util::read_bytes_opt(&paths::instructions_file(cli)) {
+            Ok(value) => snapshot.instructions = value,
+            Err(error) => degrade.feature("source", Feature::Instructions, None, error),
+        }
         match read_skills(&paths::skills_dir(cli)) {
             Ok(skills) => snapshot.skills = skills,
             Err(error) => degrade.feature(
@@ -1037,6 +1185,7 @@ pub fn run(
         skills,
         agents,
     };
+    let guard = InputGuard::capture(global_inputs(active, want));
     let analysis = analyze(active, want, opts.prune)?;
     if !opts.dry_run {
         save_conflicts(&analysis.conflicts)?;
@@ -1121,7 +1270,7 @@ pub fn run(
         after: Node::File(state_bytes),
         label: "state snapshot".into(),
     });
-    apply_transaction_with_id(&operations, &id)?;
+    apply_transaction_with_id(&operations, &id, Some(&guard))?;
     clear_resolutions()?;
     retain_transactions(10)?;
     Ok(Outcome {
@@ -1349,8 +1498,10 @@ fn read_native_agents(
 ) -> R<BTreeMap<String, AgentDefinition>> {
     let mut out = BTreeMap::new();
     let mut seen: BTreeMap<String, PathBuf> = BTreeMap::new();
-    let Ok(entries) = fs::read_dir(root) else {
-        return Ok(out);
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(util::ctx(root, e)),
     };
     let format = agent_format(cli);
     for entry in entries {
@@ -1453,8 +1604,10 @@ fn read_canonical_agents(
     origins: &mut AgentOrigins,
 ) -> R<BTreeMap<String, AgentDefinition>> {
     let mut out = BTreeMap::new();
-    let Ok(entries) = fs::read_dir(root) else {
-        return Ok(out);
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(util::ctx(root, e)),
     };
     for entry in entries {
         let entry = entry.map_err(|e| util::ctx(root, e))?;
@@ -1701,8 +1854,10 @@ fn valid_agent_id(id: &str) -> bool {
 
 fn read_skills(root: &Path) -> R<BTreeMap<String, Tree>> {
     let mut out = BTreeMap::new();
-    let Ok(entries) = fs::read_dir(root) else {
-        return Ok(out);
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(util::ctx(root, e)),
     };
     for entry in entries {
         let entry = entry.map_err(|e| util::ctx(root, e))?;
@@ -2112,6 +2267,12 @@ pub fn public_conflict(record: &ConflictRecord) -> Value {
 }
 
 pub fn resolve_conflict(id: &str, source: &str) -> R<()> {
+    let _lock = util::acquire_lock(&paths::store_root().join(".lock"), 120)?
+        .ok_or("another cli-switch operation is in progress")?;
+    resolve_conflict_locked(id, source)
+}
+
+pub(crate) fn resolve_conflict_locked(id: &str, source: &str) -> R<()> {
     let path = conflict_path(id);
     let bytes = fs::read(&path).map_err(|e| util::ctx(&path, e))?;
     let record: ConflictRecord = serde_json::from_slice(&bytes).map_err(|e| util::ctx(&path, e))?;
@@ -2263,7 +2424,12 @@ fn write_node(path: &Path, node: &Node, token: &str) -> R<()> {
             }
             #[cfg(windows)]
             {
-                if target.is_dir() {
+                if path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(target)
+                    .is_dir()
+                {
                     std::os::windows::fs::symlink_dir(target, path).map_err(|e| util::ctx(path, e))
                 } else {
                     std::os::windows::fs::symlink_file(target, path).map_err(|e| util::ctx(path, e))
@@ -2277,28 +2443,44 @@ fn node_hash(node: &Node) -> String {
     util::fingerprint(&serde_json::to_vec(node).unwrap_or_default())
 }
 
-/// A transaction that fails partway leaves its journal directory behind
-/// unless we clean it up here: callers only prune old transactions
-/// (`retain_transactions`) after a successful apply, so an error returned
-/// from this function would otherwise leak the journal it just wrote —
-/// forever, since the transaction can never succeed on retry with the same id.
-fn apply_transaction_with_id(operations: &[Operation], id: &str) -> R<()> {
+/// Journals are retained on any failure, including failed recovery. A failed
+/// restoration must never destroy the only remaining copy of original data.
+fn apply_transaction_with_id(
+    operations: &[Operation],
+    id: &str,
+    guard: Option<&InputGuard>,
+) -> R<()> {
     let tx_dir = paths::transactions().join(id);
-    let result = apply_transaction_inner(operations, id, &tx_dir);
-    if result.is_err() {
-        let _ = fs::remove_dir_all(&tx_dir);
-    }
-    result
+    apply_transaction_inner(operations, id, &tx_dir, guard)
 }
 
-fn apply_transaction_inner(operations: &[Operation], id: &str, tx_dir: &Path) -> R<()> {
+fn apply_transaction_inner(
+    operations: &[Operation],
+    id: &str,
+    tx_dir: &Path,
+    guard: Option<&InputGuard>,
+) -> R<()> {
+    apply_transaction_checked(operations, id, tx_dir, guard, |_, _| Ok(()))
+}
+
+fn apply_transaction_checked(
+    operations: &[Operation],
+    id: &str,
+    tx_dir: &Path,
+    guard: Option<&InputGuard>,
+    mut before_write: impl FnMut(usize, &[Operation]) -> R<()>,
+) -> R<()> {
     let mut entries = Vec::new();
     for op in operations {
+        check_destination(&op.path)?;
         entries.push(JournalEntry {
             path: op.path.clone(),
             before: read_node(&op.path)?,
             after_hash: node_hash(&op.after),
         });
+    }
+    if let Some(guard) = guard {
+        guard.check()?;
     }
     let journal = Journal {
         id: id.to_string(),
@@ -2318,28 +2500,96 @@ fn apply_transaction_inner(operations: &[Operation], id: &str, tx_dir: &Path) ->
     } else {
         None
     };
-    for (index, op) in operations.iter().enumerate() {
-        if read_node(&op.path)? == op.after {
-            continue;
-        }
-        let result = if fail_after == Some(index) {
-            Err(format!("injected failure before operation {index}"))
-        } else {
-            write_node(&op.path, &op.after, &format!("{id}-{index}"))
-        };
-        if let Err(error) = result {
-            for entry in journal.entries.iter().take(index + 1).rev() {
-                let _ = write_node(&entry.path, &entry.before, &format!("rollback-{id}"));
+    let mut changed = Vec::new();
+    let mut failed_write = None;
+    for (index, (op, entry)) in operations.iter().zip(&journal.entries).enumerate() {
+        let result = (|| {
+            before_write(index, operations)?;
+            let current = read_node(&op.path)?;
+            if current != entry.before {
+                return Err(format!(
+                    "{} changed before write; rerun sync",
+                    op.path.display()
+                ));
             }
-            return Err(format!(
-                "transaction {id} failed and was rolled back: {error}"
-            ));
+            if current == op.after {
+                return Ok(());
+            }
+            if fail_after == Some(index) {
+                return Err(format!("injected failure before operation {index}"));
+            }
+            // Include the current operation: writes can fail after removing a
+            // link or replacing a directory. It may need restoration as well.
+            changed.push(index);
+            if let Err(error) = write_node(&op.path, &op.after, &format!("{id}-{index}")) {
+                failed_write = Some(index);
+                return Err(error);
+            }
+            if read_node(&op.path)? != op.after {
+                return Err(format!("{} changed during write", op.path.display()));
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let mut recovery_errors = Vec::new();
+            for &changed_index in changed.iter().rev() {
+                let old = &journal.entries[changed_index];
+                // Only an absent destination after a failed write can be our
+                // partial removal. Any other unexpected content belongs to an
+                // external writer and must be left for manual recovery.
+                let restored = (|| {
+                    let current = read_node(&old.path)?;
+                    if current == old.before {
+                        return Ok(());
+                    }
+                    let partial_removal =
+                        failed_write == Some(changed_index) && current == Node::Absent;
+                    if node_hash(&current) != old.after_hash && !partial_removal {
+                        return Err(format!(
+                            "{} changed externally; restore manually",
+                            old.path.display()
+                        ));
+                    }
+                    if cfg!(debug_assertions)
+                        && std::env::var("CLI_SWITCH_TEST_FAIL_RESTORE")
+                            .ok()
+                            .as_deref()
+                            == Some("1")
+                    {
+                        return Err(format!(
+                            "injected recovery failure for {}",
+                            old.path.display()
+                        ));
+                    }
+                    write_node(&old.path, &old.before, &format!("rollback-{id}"))?;
+                    if read_node(&old.path)? != old.before {
+                        return Err(format!(
+                            "{} restoration verification failed",
+                            old.path.display()
+                        ));
+                    }
+                    Ok(())
+                })();
+                if let Err(e) = restored {
+                    recovery_errors.push(e);
+                }
+            }
+            if recovery_errors.is_empty() {
+                util::write_private(&tx_dir.join("rolled-back"), b"ok")?;
+                return Err(format!(
+                    "transaction {id} failed and was rolled back: {error}"
+                ));
+            }
+            return Err(format!("transaction {id} failed: {error}; recovery incomplete: {}; original data retained at {}", recovery_errors.join("; "), journal_path.display()));
         }
     }
+    util::write_private(&tx_dir.join("committed"), b"ok")?;
     Ok(())
 }
 
 pub fn rollback(id: &str) -> R<String> {
+    let _lock = util::acquire_lock(&paths::store_root().join(".lock"), 120)?
+        .ok_or("another cli-switch operation is in progress")?;
     let path = paths::transactions().join(id).join("journal.json");
     let bytes = fs::read(&path).map_err(|e| util::ctx(&path, e))?;
     let journal: Journal = serde_json::from_slice(&bytes).map_err(|e| util::ctx(&path, e))?;
@@ -2372,7 +2622,14 @@ pub fn rollback(id: &str) -> R<String> {
             }
         }
     }
-    apply_transaction_with_id(&ops, &new_id)?;
+    let guard = InputGuard::capture(journal.entries.iter().map(|e| e.path.clone()).collect());
+    // Verify again against the transaction, not just a newer capture.
+    for entry in &journal.entries {
+        if node_hash(&read_node(&entry.path)?) != entry.after_hash {
+            return Err(format!("{} changed before rollback", entry.path.display()));
+        }
+    }
+    apply_transaction_with_id(&ops, &new_id, Some(&guard))?;
     retain_transactions(10)?;
     Ok(new_id)
 }
@@ -2383,7 +2640,10 @@ fn retain_transactions(keep: usize) -> R<()> {
     };
     let mut dirs = entries
         .flatten()
-        .filter(|e| e.path().is_dir())
+        .filter(|e| {
+            e.path().is_dir()
+                && (e.path().join("committed").exists() || e.path().join("rolled-back").exists())
+        })
         .collect::<Vec<_>>();
     dirs.sort_by_key(|e| e.file_name());
     let remove_count = dirs.len().saturating_sub(keep);
@@ -2394,12 +2654,131 @@ fn retain_transactions(keep: usize) -> R<()> {
 }
 
 fn transaction_id() -> String {
-    format!("tx-{}-{}", util::now_millis(), std::process::id())
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!(
+        "tx-{}-{}-{}",
+        util::now_millis(),
+        std::process::id(),
+        SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("cli-switch-{label}-{}", transaction_id()));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn stale_plan_preserves_edits_made_before_journal_capture() {
+        let root = scratch("stale-plan");
+        let path = root.join("config");
+        fs::write(&path, "before").unwrap();
+        let guard = InputGuard::capture(vec![path.clone()]);
+        fs::write(&path, "external edit").unwrap();
+        let ops = vec![Operation {
+            path: path.clone(),
+            after: Node::File(b"planned".to_vec()),
+            label: "test".into(),
+        }];
+        let error = apply_transaction_inner(&ops, "stale", &root.join("journal"), Some(&guard))
+            .unwrap_err();
+        assert!(error.contains("changed while planning"));
+        assert_eq!(fs::read(&path).unwrap(), b"external edit");
+        assert!(!root.join("journal").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn late_external_edit_aborts_and_restores_only_our_writes() {
+        let root = scratch("late-edit");
+        let first = root.join("first");
+        let second = root.join("second");
+        fs::write(&first, "before one").unwrap();
+        fs::write(&second, "before two").unwrap();
+        let ops = vec![
+            Operation {
+                path: first.clone(),
+                after: Node::File(b"after one".to_vec()),
+                label: "first".into(),
+            },
+            Operation {
+                path: second.clone(),
+                after: Node::File(b"after two".to_vec()),
+                label: "second".into(),
+            },
+        ];
+        let error =
+            apply_transaction_checked(&ops, "late", &root.join("journal"), None, |index, _| {
+                if index == 1 {
+                    fs::write(&second, "external edit").unwrap();
+                }
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(error.contains("changed before write"));
+        assert!(error.contains("was rolled back"));
+        assert_eq!(fs::read(&first).unwrap(), b"before one");
+        assert_eq!(fs::read(&second).unwrap(), b"external edit");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recovery_preserves_external_edits_to_a_completed_operation() {
+        let root = scratch("recovery-external-edit");
+        let first = root.join("first");
+        let second = root.join("second");
+        fs::write(&first, "before one").unwrap();
+        fs::write(&second, "before two").unwrap();
+        let ops = vec![
+            Operation {
+                path: first.clone(),
+                after: Node::File(b"after one".to_vec()),
+                label: "first".into(),
+            },
+            Operation {
+                path: second.clone(),
+                after: Node::File(b"after two".to_vec()),
+                label: "second".into(),
+            },
+        ];
+        let error =
+            apply_transaction_checked(&ops, "external", &root.join("journal"), None, |index, _| {
+                if index == 1 {
+                    fs::write(&first, "external edit").unwrap();
+                    return Err("stop before second write".into());
+                }
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(error.contains("recovery incomplete"));
+        assert!(!error.contains("was rolled back"));
+        assert_eq!(fs::read(&first).unwrap(), b"external edit");
+        assert_eq!(fs::read(&second).unwrap(), b"before two");
+        assert!(root.join("journal/journal.json").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn input_guard_observes_linked_content_and_unrelated_siblings() {
+        let root = scratch("input-links");
+        fs::create_dir_all(root.join("skills")).unwrap();
+        fs::write(root.join("instructions"), "before").unwrap();
+        fs::write(root.join("skills/other"), "before").unwrap();
+        std::os::unix::fs::symlink("../instructions", root.join("skills/link")).unwrap();
+        let guard = InputGuard::capture(vec![root.join("skills")]);
+        fs::write(root.join("instructions"), "changed target").unwrap();
+        assert!(guard.check().is_err());
+        let guard = InputGuard::capture(vec![root.join("skills")]);
+        fs::write(root.join("skills/other"), "changed sibling").unwrap();
+        assert!(guard.check().is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[cfg(unix)]
     #[test]

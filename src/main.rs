@@ -189,6 +189,10 @@ fn cmd_hook(args: &[String]) -> R<()> {
             Ok(())
         }
         Err(error) if error == "unresolved conflicts" => {
+            let project_conflicts = project_blockers()?
+                .into_iter()
+                .map(|b| b.detail)
+                .collect::<Vec<_>>();
             let conflicts = engine::list_conflicts()?
                 .iter()
                 .map(engine::public_conflict)
@@ -199,9 +203,13 @@ fn cmd_hook(args: &[String]) -> R<()> {
                     "requires_user": true,
                     "message": "cli-switch found divergent edits. Discuss the masked candidates with the user and ask for explicit confirmation before resolving.",
                     "conflicts": conflicts,
+                    "project_conflicts": project_conflicts,
                 })).map_err(|e| e.to_string())?);
             } else {
-                println!("cli-switch needs your help: divergent configuration edits were found and nothing was changed.");
+                println!("cli-switch needs your help: divergent configuration edits were found; unaffected features may have been applied.");
+                for detail in &project_conflicts {
+                    println!("{detail}");
+                }
                 println!("Discuss these masked candidates with the user and ask for explicit confirmation:");
                 println!(
                     "{}",
@@ -295,7 +303,8 @@ fn cmd_doctor() -> R<i32> {
     println!();
 
     let healthy = health::load()?.map(|l| l.result.healthy()).unwrap_or(false);
-    let blockers = engine::preflight(&active, want, true)?;
+    let mut blockers = engine::preflight(&active, want, true)?;
+    blockers.extend(project_blockers()?);
     if blockers.is_empty() {
         println!("Blockers: none — the next `cli-switch sync` has nothing in its way.");
         // Exit 0 from `status` or `doctor` means the same thing everywhere:
@@ -316,7 +325,11 @@ fn cmd_doctor() -> R<i32> {
             blocker.detail
         );
     }
-    Ok(EXIT_DEGRADED)
+    Ok(if blockers.iter().any(|b| b.code == "conflict") {
+        2
+    } else {
+        EXIT_DEGRADED
+    })
 }
 
 /// The one thing a health check must never do is report the shape of the
@@ -407,7 +420,65 @@ pub(crate) fn print_status() -> R<i32> {
             "It is not the result of the last sync — see `health` above, or run `cli-switch doctor`."
         );
     }
-    Ok(if healthy { 0 } else { EXIT_DEGRADED })
+    let cfg = config::load()?;
+    let mut blockers = engine::preflight(
+        &config::active_clis(&cfg),
+        engine::FeatureSet {
+            mcp: cfg.mcp,
+            instructions: cfg.instructions,
+            skills: cfg.skills,
+            agents: cfg.agents,
+        },
+        false,
+    )?;
+    blockers.extend(project_blockers()?);
+    for blocker in &blockers {
+        println!("  [{}] {}", blocker.code, blocker.detail);
+    }
+    let last_conflicts = health::load()?.is_some_and(|r| r.result == health::SyncResult::Conflicts);
+    Ok(
+        if pending > 0 || last_conflicts || blockers.iter().any(|b| b.code == "conflict") {
+            2
+        } else if healthy && blockers.is_empty() {
+            0
+        } else {
+            EXIT_DEGRADED
+        },
+    )
+}
+
+fn project_blockers() -> R<Vec<engine::Blocker>> {
+    let Some(cfg) = config::load_project()? else {
+        return Ok(Vec::new());
+    };
+    if cfg.clis.is_empty() {
+        return Ok(Vec::new());
+    }
+    match project::sync(
+        &cfg.clis,
+        &project::Options {
+            instructions: cfg.instructions,
+            skills: cfg.skills,
+            dry_run: true,
+        },
+    ) {
+        Ok(out) => Ok(out
+            .conflicts
+            .into_iter()
+            .map(|detail| engine::Blocker {
+                code: "conflict",
+                feature: None,
+                unit: Some("project mappings".into()),
+                detail,
+            })
+            .collect()),
+        Err(detail) => Ok(vec![engine::Blocker {
+            code: "project",
+            feature: None,
+            unit: None,
+            detail,
+        }]),
+    }
 }
 
 fn status_global(cfg: &config::Config) -> R<()> {

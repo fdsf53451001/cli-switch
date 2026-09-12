@@ -4,6 +4,8 @@ Keep your **MCP servers, skills, instructions, and custom agents** in sync acros
 
 Supports: **Claude Code · Codex · opencode · Kiro · Antigravity CLI (`agy`) · GitHub Copilot CLI (`copilot`)**
 
+**Project instruction safety:** different `AGENTS.md` and native instruction files now stop with a conflict, even if they share headings. Review and reconcile their contents before syncing; cli-switch no longer combines their lines automatically.
+
 ---
 
 ## The Problem
@@ -91,21 +93,39 @@ cli-switch rollback <transaction-id>
 ## How It Works
 
 - **MCP servers** — edit once in `~/.config/cli-switch/mcp.json`; converted to each CLI's native format on sync
-- **Instructions** — independent native files compared with the last successful snapshot
+- **Global instructions** — independent native files compared with the last successful snapshot
 - **Skills** — each skill directory is synchronized as one atomic unit
 - **Custom agents** — opt-in, direct native files (no plugin or MCP control plane), with portable core fields and namespaced native extensions
 - **Bidirectional** — changes made inside any CLI are merged back on the next sync
 - **Fail closed** — divergent edits create a conflict packet and leave that feature's managed files untouched
-- **Isolated per feature** — a problem in one feature never stops the other three; the failing feature is skipped, reported with the file and field that caused it, and its snapshot is left un-advanced so the change is re-detected next run
-- **Transactional** — a failed write rolls the entire sync back; successful transactions can be explicitly restored
+- **Global feature isolation** — a problem in one global feature never stops the other three; the failing feature is skipped, reported with the file and field that caused it, and its snapshot is left un-advanced so the change is re-detected next run
+- **Transactional per pass** — global sync, project agents, and project instruction/skill mappings each have their own journal. A failed write restores that pass's modified files; earlier committed passes remain applied and are recorded in sync health. Successful transactions can be explicitly restored.
+- **Concurrent edits** — source changes during planning or destination changes detected before writing abort the pass. Sync, rollback, conflict-resolution writes, and hook installation/removal share an OS-held lock; long-running operations do not lose their lock after a timeout.
+- **Recovery evidence** — every restoration is checked. If recovery fails or a file has been edited externally, the error names the retained journal and reports incomplete recovery. Journals without a completion marker are excluded from automatic pruning.
 
-`cli-switch status` reports the recorded result of the **last sync attempt**, not the shape of the filesystem: a run that fails commits no transaction, so anything derived from the target paths alone would keep looking green. `status` and `doctor` exit `0` only when the last sync succeeded and nothing blocks the next one; `3` means degraded, `2` means unresolved conflicts.
+`cli-switch status` reports the recorded result of the **last sync attempt** and checks for current blockers. A failed pass can leave target paths looking healthy; if an earlier pass already committed, its applied count and transaction remain in the health record. `status` and `doctor` exit `0` only when the last sync succeeded and nothing blocks the next one; `3` means degraded, `2` means unresolved conflicts.
 
 Conflict JSON always masks MCP environment and header values. Discuss the packet with your AI CLI, choose a source, then run the explicit `conflicts resolve` command. Startup hooks apply only conflict-free plans.
 
 ### Project-level sync
 
 Run `cli-switch` inside a project directory and choose **Set project level** to sync that project's instructions, skills, and optionally custom agents across CLIs. Uses `AGENTS.md`, `.agents/skills/`, and `.cli-switch/agents/` as the shared sources. Global and project agent snapshots are independent.
+
+Project instruction/skill mappings are planned together before any managed file is changed, including `.gitignore`. Identical native instruction files can become relative symlinks; an absent `AGENTS.md` can adopt matching native content. Different content, unrelated symlinks, and existing native skill directories require manual reconciliation. A conflict leaves the mapping pass untouched, exits `2`, and appears in `status`, `doctor`, and hook diagnostics. Disabling both mappings creates no project instruction or skill scaffolding.
+
+To inspect a project instruction conflict:
+
+```bash
+cli-switch sync --dry-run
+git diff --no-index -- AGENTS.md CLAUDE.md
+```
+
+Review and edit the files into the intended shared content, then run `cli-switch sync`. The diff command exits `1` when the files differ. Project mapping conflicts are resolved by reconciling files; `conflicts resolve` handles the snapshot-based global/custom-agent conflict packets.
+
+Successful project mapping runs print a transaction ID and record it in sync health; the existing `rollback` command can restore that transaction. On Windows, project symlink creation requires permission to create symlinks. A failure rolls the mapping pass back rather than silently substituting copies.
+
+Rollback protects files changed after the transaction. If automatic recovery reports **recovery incomplete**, preserve the named `journal.json`: it contains the original file data. Restore the affected paths manually after addressing the reported error; the normal rollback command does not force-overwrite externally changed or partially recovered files. Automatic rollback handles returned write errors; interrupted processes or power loss can require manual recovery from the journal.
+
 
 ### Custom-agent sync
 
@@ -144,5 +164,15 @@ AGENTS.md    # Canonical shared instructions
 skills/      # Canonical shared skills
 agents/      # Canonical custom-agent bundles (opt-in)
 config.toml  # Which CLIs and scopes are active
-state/       # Private snapshots, last-sync health, pending conflicts, last 10 transactions
+state/       # Snapshots, health, conflicts, 10 completed transactions + retained recovery journals
+```
+
+## Building and testing
+
+Building from source requires Rust 1.89 or newer. The test suite uses temporary homes and project directories, including injected write/recovery failures and concurrent-edit cases.
+
+```bash
+cargo test --all-targets
+cargo clippy --all-targets -- -D warnings
+cargo fmt --all -- --check
 ```

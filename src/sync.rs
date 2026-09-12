@@ -23,6 +23,7 @@ struct Report {
     conflicts: usize,
     skipped: Vec<engine::Skipped>,
     blocked: Option<String>,
+    notes: Vec<health::Note>,
 }
 
 impl Report {
@@ -63,47 +64,48 @@ impl Report {
                     unit: skipped.unit.clone(),
                     reason: skipped.reason.clone(),
                 })
+                .chain(self.notes.iter().cloned())
                 .collect(),
         }
     }
 }
 
 pub fn run(opts: &Options) -> R<()> {
-    let outcome = run_inner(opts);
-    let (record, blocked, conflicts) = match &outcome {
-        // Nothing ran — another process holds the lock. Not a result to record.
-        Ok(None) => (None, None, 0),
-        Ok(Some(report)) => (
-            Some(report.record()),
-            report.blocked.clone(),
-            report.conflicts,
-        ),
-        Err(error) => (
-            Some(health::LastSync {
-                finished_ms: util::now_millis(),
-                result: health::SyncResult::Failed,
-                error: Some(error.clone()),
-                transaction: None,
-                conflicts: 0,
-                applied: 0,
-                skipped: Vec::new(),
-            }),
-            None,
-            0,
-        ),
+    // Hold the lock through scaffold creation and the final health write.
+    let _lock = if opts.dry_run {
+        None
+    } else {
+        match util::acquire_lock(&paths::store_root().join(".lock"), 120)? {
+            Some(lock) => Some(lock),
+            None => {
+                if !opts.quiet {
+                    println!("Another cli-switch run is in progress — skipping.");
+                }
+                return Ok(());
+            }
+        }
     };
-
-    // Written outside the transaction, unconditionally: a sync that fails
-    // commits nothing, so without this record every derived health check keeps
-    // reporting the state of the last run that did succeed.
+    let mut report = Report::default();
+    let outcome = run_inner(opts, &mut report);
     if !opts.dry_run {
-        if let Some(record) = record {
-            let _ = health::record(&record);
+        let mut record = report.record();
+        if let Err(error) = &outcome {
+            record.result = health::SyncResult::Failed;
+            record.error = Some(error.clone());
+        }
+        if let Err(error) = health::record(&record) {
+            return Err(format!(
+                "{}could not record sync health: {error}",
+                outcome
+                    .as_ref()
+                    .err()
+                    .map(|e| format!("{e}; "))
+                    .unwrap_or_default()
+            ));
         }
     }
-
     outcome?;
-    finish(blocked, conflicts, opts)
+    finish(report.blocked, report.conflicts, opts)
 }
 
 /// Exit semantics, unchanged from before per-feature isolation: a migration
@@ -121,40 +123,24 @@ fn finish(blocked: Option<String>, conflicts: usize, opts: &Options) -> R<()> {
     Ok(())
 }
 
-fn run_inner(opts: &Options) -> R<Option<Report>> {
+fn run_inner(opts: &Options, report: &mut Report) -> R<()> {
     if !opts.dry_run {
         crate::store::ensure_scaffold()?;
     }
-
-    let _lock = if opts.dry_run {
-        None
-    } else {
-        match crate::util::acquire_lock(&paths::store_root().join(".lock"), 120)? {
-            Some(lock) => Some(lock),
-            None => {
-                if !opts.quiet {
-                    println!("Another cli-switch run is in progress — skipping.");
-                }
-                return Ok(None);
-            }
-        }
-    };
-
     let cfg = config::load()?;
     let active = config::active_clis(&cfg);
-    let mut report = Report::default();
     if active.is_empty() {
         if !opts.quiet {
             println!("No configured CLI is installed — nothing to sync.");
         }
     } else {
-        run_global(&cfg, &active, opts, &mut report)?;
+        run_global(&cfg, &active, opts, report)?;
     }
 
     if let Some(project_cfg) = config::load_project()? {
-        sync_project(&project_cfg, opts, &mut report)?;
+        sync_project(&project_cfg, opts, report)?;
     }
-    Ok(Some(report))
+    Ok(())
 }
 
 fn run_global(cfg: &Config, active: &[Cli], opts: &Options, report: &mut Report) -> R<()> {
@@ -257,7 +243,7 @@ fn run_global(cfg: &Config, active: &[Cli], opts: &Options, report: &mut Report)
                     .split(',')
                     .next()
                     .unwrap_or(&candidate.source);
-                engine::resolve_conflict(&conflict.id, source)?;
+                engine::resolve_conflict_locked(&conflict.id, source)?;
                 resolved_any = true;
             }
             if resolved_any {
@@ -371,7 +357,22 @@ fn sync_project(cfg: &Config, opts: &Options, report: &mut Report) -> R<()> {
             dry_run: opts.dry_run,
         },
     )?;
+    report.applied += out.actions.len();
+    report.conflicts += out.conflicts.len();
+    if out.transaction.is_some() {
+        report.transaction = out.transaction.clone();
+    }
+    report
+        .notes
+        .extend(out.conflicts.iter().map(|reason| health::Note {
+            feature: "project mappings".into(),
+            unit: None,
+            reason: reason.clone(),
+        }));
     if !opts.quiet {
+        if let Some(id) = &out.transaction {
+            println!("  project transaction: {id}");
+        }
         for action in out.actions {
             println!("  project: {action}");
         }
