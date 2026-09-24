@@ -639,8 +639,7 @@ fn project_instruction_ok(
     antigravity_rule: &std::path::Path,
 ) -> bool {
     match cli {
-        Cli::Claude => link_ok(&root.join("CLAUDE.md"), agents),
-        Cli::Codex | Cli::Opencode | Cli::Copilot => agents.exists(),
+        Cli::Claude | Cli::Codex | Cli::Opencode | Cli::Copilot => agents.exists(),
         Cli::Kiro => link_ok(
             &root.join(".kiro").join("steering").join("AGENTS.md"),
             agents,

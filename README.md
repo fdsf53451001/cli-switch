@@ -111,13 +111,15 @@ Conflict JSON always masks MCP environment and header values. Discuss the packet
 
 Run `cli-switch` inside a project directory and choose **Set project level** to sync that project's instructions, skills, and optionally custom agents across CLIs. Uses `AGENTS.md`, `.agents/skills/`, and `.cli-switch/agents/` as the shared sources. Global and project agent snapshots are independent.
 
+Claude Code, Codex, opencode, and Copilot read the project `AGENTS.md` directly, so no native instruction file is created for them. A `CLAUDE.md -> AGENTS.md` symlink left by an older release is removed on the next sync so Claude does not load the same instructions twice; a real `CLAUDE.md` is treated as Claude-only instructions and left untouched.
+
 Project instruction/skill mappings are planned together before any managed file is changed, including `.gitignore`. Identical native instruction files can become relative symlinks; an absent `AGENTS.md` can adopt matching native content. Different content, unrelated symlinks, and existing native skill directories require manual reconciliation. A conflict leaves the mapping pass untouched, exits `2`, and appears in `status`, `doctor`, and hook diagnostics. Disabling both mappings creates no project instruction or skill scaffolding.
 
 To inspect a project instruction conflict:
 
 ```bash
 cli-switch sync --dry-run
-git diff --no-index -- AGENTS.md CLAUDE.md
+git diff --no-index -- AGENTS.md .kiro/steering/AGENTS.md
 ```
 
 Review and edit the files into the intended shared content, then run `cli-switch sync`. The diff command exits `1` when the files differ. Project mapping conflicts are resolved by reconciling files; `conflicts resolve` handles the snapshot-based global/custom-agent conflict packets.

@@ -571,17 +571,36 @@ fn configure_project(sandbox: &Sandbox, features: &str) {
 }
 
 #[cfg(unix)]
+const KIRO_STEERING: &str = ".kiro/steering/AGENTS.md";
+
+/// Kiro still needs a native instruction mapping (Claude reads AGENTS.md itself),
+/// so transaction tests exercise it through Kiro's steering file.
+#[cfg(unix)]
+fn configure_kiro_project(sandbox: &Sandbox, features: &str) {
+    fs::create_dir_all(sandbox.project.join(".cli-switch")).unwrap();
+    fs::create_dir_all(sandbox.project.join(".kiro/steering")).unwrap();
+    fs::write(
+        sandbox.project.join(".cli-switch/config.toml"),
+        format!("scope = \"project\"\nclis = [\"kiro\"]\n[features]\n{features}\n",),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
 #[test]
 fn project_contradictory_instructions_with_shared_heading_are_never_merged() {
     let sandbox = Sandbox::new("project-contradiction");
-    configure_project(
-        &sandbox,
-        "mcp = false\nskills = false\ninstructions = true\nagents = false",
-    );
+    fs::create_dir_all(sandbox.project.join(".cli-switch")).unwrap();
+    fs::write(
+        sandbox.project.join(".cli-switch/config.toml"),
+        "scope = \"project\"\nclis = [\"claude\", \"kiro\"]\n[features]\nmcp = false\nskills = false\ninstructions = true\nagents = false\n",
+    )
+    .unwrap();
+    fs::create_dir_all(sandbox.project.join(".kiro/steering")).unwrap();
     let original = "# Rules\nAlways run tests.\n";
     let native = "# Rules\nNever run tests.\n";
     fs::write(sandbox.project.join("AGENTS.md"), original).unwrap();
-    fs::write(sandbox.project.join("CLAUDE.md"), native).unwrap();
+    fs::write(sandbox.project.join(".kiro/steering/AGENTS.md"), native).unwrap();
     let result = sandbox.command(&["sync", "--quiet"]);
     assert_eq!(result.status.code(), Some(2), "{}", text(&result));
     assert_eq!(
@@ -589,13 +608,15 @@ fn project_contradictory_instructions_with_shared_heading_are_never_merged() {
         original
     );
     assert_eq!(
-        fs::read_to_string(sandbox.project.join("CLAUDE.md")).unwrap(),
+        fs::read_to_string(sandbox.project.join(".kiro/steering/AGENTS.md")).unwrap(),
         native
     );
-    assert!(!fs::symlink_metadata(sandbox.project.join("CLAUDE.md"))
-        .unwrap()
-        .file_type()
-        .is_symlink());
+    assert!(
+        !fs::symlink_metadata(sandbox.project.join(".kiro/steering/AGENTS.md"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
     assert!(!sandbox.project.join(".gitignore").exists());
     let health: serde_json::Value =
         serde_json::from_slice(&fs::read(sandbox.store.join("state/last-sync.json")).unwrap())
@@ -616,44 +637,64 @@ fn project_contradictory_instructions_with_shared_heading_are_never_merged() {
 
 #[cfg(unix)]
 #[test]
-fn project_link_claude_md_with_no_common_anchor_is_reported_as_conflict() {
-    let sandbox = Sandbox::new("project-merge-conflict");
+fn project_real_claude_md_is_left_alone_because_claude_reads_agents_md() {
+    let sandbox = Sandbox::new("project-real-claude-md");
     sandbox.install_two_clis();
     configure_project(
         &sandbox,
         "mcp = false\nskills = false\ninstructions = true\nagents = false",
     );
-    fs::write(
-        sandbox.project.join("AGENTS.md"),
-        "completely different content A\n",
-    )
-    .unwrap();
-    fs::write(
-        sandbox.project.join("CLAUDE.md"),
-        "totally unrelated content B\n",
-    )
-    .unwrap();
+    fs::write(sandbox.project.join("AGENTS.md"), "shared content A\n").unwrap();
+    fs::write(sandbox.project.join("CLAUDE.md"), "claude-only content B\n").unwrap();
 
     let result = sandbox.command(&["sync"]);
-    assert_eq!(result.status.code(), Some(2), "{}", text(&result));
-    assert!(
-        !fs::symlink_metadata(sandbox.project.join("CLAUDE.md"))
-            .unwrap()
-            .file_type()
-            .is_symlink(),
-        "CLAUDE.md should not have been replaced on merge failure"
-    );
+    assert!(result.status.success(), "{}", text(&result));
     assert_eq!(
         fs::read_to_string(sandbox.project.join("AGENTS.md")).unwrap(),
-        "completely different content A\n",
-        "canonical must not change when merge fails"
+        "shared content A\n"
     );
     assert_eq!(
         fs::read_to_string(sandbox.project.join("CLAUDE.md")).unwrap(),
-        "totally unrelated content B\n",
-        "native file must not change when merge fails"
+        "claude-only content B\n",
+        "a real CLAUDE.md is Claude-specific and must not be touched"
     );
-    assert!(text(&result).contains("cannot be auto-merged"));
+    assert!(!fs::symlink_metadata(sandbox.project.join("CLAUDE.md"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+#[cfg(unix)]
+#[test]
+fn project_sync_removes_legacy_claude_md_symlink() {
+    use std::os::unix::fs::symlink;
+    let sandbox = Sandbox::new("project-legacy-claude-link");
+    sandbox.install_two_clis();
+    configure_project(
+        &sandbox,
+        "mcp = false\nskills = false\ninstructions = true\nagents = false",
+    );
+    fs::write(sandbox.project.join("AGENTS.md"), "# instructions\n").unwrap();
+    symlink("AGENTS.md", sandbox.project.join("CLAUDE.md")).unwrap();
+
+    let result = sandbox.command(&["sync"]);
+    assert!(result.status.success(), "{}", text(&result));
+    assert!(text(&result).contains("removed legacy"));
+    assert!(fs::symlink_metadata(sandbox.project.join("CLAUDE.md")).is_err());
+    assert_eq!(
+        fs::read_to_string(sandbox.project.join("AGENTS.md")).unwrap(),
+        "# instructions\n"
+    );
+
+    // A symlink pointing somewhere else is not ours and stays.
+    fs::write(sandbox.project.join("OTHER.md"), "other\n").unwrap();
+    symlink("OTHER.md", sandbox.project.join("CLAUDE.md")).unwrap();
+    let second = sandbox.command(&["sync"]);
+    assert!(second.status.success(), "{}", text(&second));
+    assert_eq!(
+        fs::read_link(sandbox.project.join("CLAUDE.md")).unwrap(),
+        std::path::Path::new("OTHER.md")
+    );
 }
 
 #[cfg(unix)]
@@ -696,7 +737,6 @@ fn project_sync_maintains_gitignore_for_cli_private_dirs() {
 #[cfg(unix)]
 #[test]
 fn project_symlinks_are_relative_to_the_link_location() {
-    use std::os::unix::fs::symlink;
     let sandbox = Sandbox::new("project-relative-links");
     sandbox.install_two_clis();
     configure_project(
@@ -704,7 +744,6 @@ fn project_symlinks_are_relative_to_the_link_location() {
         "mcp = false\nskills = true\ninstructions = true\nagents = false",
     );
     fs::write(sandbox.project.join("AGENTS.md"), "# instructions\n").unwrap();
-    fs::write(sandbox.project.join("CLAUDE.md"), "# instructions\n").unwrap();
     fs::create_dir_all(sandbox.project.join(".agents/skills/demo")).unwrap();
     fs::write(
         sandbox.project.join(".agents/skills/demo/SKILL.md"),
@@ -714,14 +753,6 @@ fn project_symlinks_are_relative_to_the_link_location() {
 
     let result = sandbox.command(&["sync"]);
     assert!(result.status.success(), "{}", text(&result));
-
-    let claude_link = fs::read_link(sandbox.project.join("CLAUDE.md")).unwrap();
-    assert!(
-        claude_link.is_relative(),
-        "CLAUDE.md symlink must be relative, got {}",
-        claude_link.display()
-    );
-    assert_eq!(claude_link, std::path::Path::new("AGENTS.md"));
 
     let skills_link = fs::read_link(sandbox.project.join(".claude/skills")).unwrap();
     assert!(
@@ -735,27 +766,6 @@ fn project_symlinks_are_relative_to_the_link_location() {
     let second = sandbox.command(&["sync"]);
     assert!(second.status.success(), "{}", text(&second));
     assert!(text(&second).contains("already linked"));
-
-    // An older absolute symlink is auto-rewritten to relative on the next sync.
-    fs::remove_file(sandbox.project.join("CLAUDE.md")).unwrap();
-    symlink(
-        sandbox.project.join("AGENTS.md"),
-        sandbox.project.join("CLAUDE.md"),
-    )
-    .unwrap();
-    let third = sandbox.command(&["sync"]);
-    assert!(third.status.success(), "{}", text(&third));
-    assert!(
-        text(&third).contains("relinked"),
-        "an absolute symlink must be rewritten to relative"
-    );
-    let after = fs::read_link(sandbox.project.join("CLAUDE.md")).unwrap();
-    assert!(
-        after.is_relative(),
-        "CLAUDE.md symlink must now be relative, got {}",
-        after.display()
-    );
-    assert_eq!(after, std::path::Path::new("AGENTS.md"));
 }
 
 #[cfg(unix)]
@@ -819,20 +829,20 @@ fn project_preflight_failure_leaves_all_files_unchanged() {
 #[test]
 fn project_write_failure_restores_original_native_file() {
     let sandbox = Sandbox::new("project-rollback");
-    configure_project(
+    configure_kiro_project(
         &sandbox,
         "skills = false\ninstructions = true\nagents = false",
     );
     fs::write(sandbox.project.join("AGENTS.md"), "identical\n").unwrap();
-    fs::write(sandbox.project.join("CLAUDE.md"), "identical\n").unwrap();
+    fs::write(sandbox.project.join(KIRO_STEERING), "identical\n").unwrap();
     let result = sandbox.command_with_env(&["sync"], Some(("CLI_SWITCH_TEST_FAIL_AFTER", "1")));
     assert_eq!(result.status.code(), Some(1), "{}", text(&result));
     assert!(text(&result).contains("was rolled back"));
-    assert!(fs::symlink_metadata(sandbox.project.join("CLAUDE.md"))
+    assert!(fs::symlink_metadata(sandbox.project.join(KIRO_STEERING))
         .unwrap()
         .is_file());
     assert_eq!(
-        fs::read_to_string(sandbox.project.join("CLAUDE.md")).unwrap(),
+        fs::read_to_string(sandbox.project.join(KIRO_STEERING)).unwrap(),
         "identical\n"
     );
     assert!(!sandbox.project.join(".gitignore").exists());
@@ -842,12 +852,12 @@ fn project_write_failure_restores_original_native_file() {
 #[test]
 fn project_transaction_can_be_explicitly_rolled_back() {
     let sandbox = Sandbox::new("project-explicit-rollback");
-    configure_project(
+    configure_kiro_project(
         &sandbox,
         "skills = false\ninstructions = true\nagents = false",
     );
     fs::write(sandbox.project.join("AGENTS.md"), "identical\n").unwrap();
-    fs::write(sandbox.project.join("CLAUDE.md"), "identical\n").unwrap();
+    fs::write(sandbox.project.join(KIRO_STEERING), "identical\n").unwrap();
     let result = sandbox.command(&["sync"]);
     assert!(result.status.success(), "{}", text(&result));
     let health: serde_json::Value =
@@ -857,11 +867,11 @@ fn project_transaction_can_be_explicitly_rolled_back() {
     let id = health["transaction"].as_str().unwrap();
     let rollback = sandbox.command(&["rollback", id]);
     assert!(rollback.status.success(), "{}", text(&rollback));
-    assert!(fs::symlink_metadata(sandbox.project.join("CLAUDE.md"))
+    assert!(fs::symlink_metadata(sandbox.project.join(KIRO_STEERING))
         .unwrap()
         .is_file());
     assert_eq!(
-        fs::read_to_string(sandbox.project.join("CLAUDE.md")).unwrap(),
+        fs::read_to_string(sandbox.project.join(KIRO_STEERING)).unwrap(),
         "identical\n"
     );
     assert!(!sandbox.project.join(".gitignore").exists());
@@ -871,12 +881,12 @@ fn project_transaction_can_be_explicitly_rolled_back() {
 #[test]
 fn failed_recovery_is_reported_and_original_journal_is_retained() {
     let sandbox = Sandbox::new("recovery-failure");
-    configure_project(
+    configure_kiro_project(
         &sandbox,
         "skills = false\ninstructions = true\nagents = false",
     );
     fs::write(sandbox.project.join("AGENTS.md"), "original\n").unwrap();
-    fs::write(sandbox.project.join("CLAUDE.md"), "original\n").unwrap();
+    fs::write(sandbox.project.join(KIRO_STEERING), "original\n").unwrap();
     let result = sandbox.command_with_envs(
         &["sync"],
         &[
@@ -916,12 +926,12 @@ fn failed_recovery_is_reported_and_original_journal_is_retained() {
 #[test]
 fn project_adopts_one_native_file_without_placeholder_pollution() {
     let sandbox = Sandbox::new("project-adopt");
-    configure_project(
+    configure_kiro_project(
         &sandbox,
         "skills = false\ninstructions = true\nagents = false",
     );
     fs::write(
-        sandbox.project.join("CLAUDE.md"),
+        sandbox.project.join(KIRO_STEERING),
         "# Native instructions\nKeep this intact.\n",
     )
     .unwrap();
@@ -954,15 +964,15 @@ fn disabled_project_mappings_create_no_instruction_or_skill_files() {
 #[test]
 fn unrelated_broken_symlink_is_not_retargeted() {
     let sandbox = Sandbox::new("project-foreign-link");
-    configure_project(
+    configure_kiro_project(
         &sandbox,
         "skills = false\ninstructions = true\nagents = false",
     );
-    std::os::unix::fs::symlink("other-missing.md", sandbox.project.join("CLAUDE.md")).unwrap();
+    std::os::unix::fs::symlink("other-missing.md", sandbox.project.join(KIRO_STEERING)).unwrap();
     let result = sandbox.command(&["sync"]);
     assert_eq!(result.status.code(), Some(2));
     assert_eq!(
-        fs::read_link(sandbox.project.join("CLAUDE.md")).unwrap(),
+        fs::read_link(sandbox.project.join(KIRO_STEERING)).unwrap(),
         PathBuf::from("other-missing.md")
     );
     assert!(!sandbox.project.join("AGENTS.md").exists());

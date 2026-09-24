@@ -9,7 +9,6 @@
 #   .agents/rules/     — shared rules (for Antigravity, @-includes AGENTS.md)
 #
 # What this script creates:
-#   CLAUDE.md                        → AGENTS.md
 #   .github/copilot-instructions.md  → AGENTS.md
 #   .kiro/steering/AGENTS.md         → AGENTS.md
 #   .agents/rules/agents-root.md     (created, not symlinked — @-includes AGENTS.md)
@@ -98,8 +97,7 @@ report_conflicts() {
 echo ""
 echo "=== 指令檔（Instructions）==="
 
-# Claude Code：讀取 CLAUDE.md
-make_symlink "$ROOT/AGENTS.md" "$ROOT/CLAUDE.md"
+# Claude Code：已原生讀取 AGENTS.md，不需要 CLAUDE.md 連結
 
 # GitHub Copilot：讀取 .github/copilot-instructions.md
 make_symlink "$ROOT/AGENTS.md" "$ROOT/.github/copilot-instructions.md"

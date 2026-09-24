@@ -39,12 +39,9 @@ pub fn sync(clis: &[Cli], opts: &Options) -> R<Outcome> {
     }
     let mut links = Vec::new();
     for cli in clis {
-        if opts.instructions {
-            match cli {
-                Cli::Claude => links.push((agents.clone(), root.join("CLAUDE.md"))),
-                Cli::Kiro => links.push((agents.clone(), root.join(".kiro/steering/AGENTS.md"))),
-                _ => {}
-            }
+        // Claude Code, Codex, opencode and Copilot read AGENTS.md natively.
+        if opts.instructions && *cli == Cli::Kiro {
+            links.push((agents.clone(), root.join(".kiro/steering/AGENTS.md")));
         }
         if opts.skills {
             match cli {
@@ -53,6 +50,17 @@ pub fn sync(clis: &[Cli], opts: &Options) -> R<Outcome> {
                 _ => {}
             }
         }
+    }
+    // Older releases linked CLAUDE.md -> AGENTS.md. Claude now loads AGENTS.md
+    // itself, so a leftover link would feed it the same instructions twice.
+    let legacy_claude = root.join("CLAUDE.md");
+    let retire_claude_link = opts.instructions
+        && clis.contains(&Cli::Claude)
+        && fs::symlink_metadata(&legacy_claude).is_ok_and(|m| m.file_type().is_symlink())
+        && fs::read_link(&legacy_claude)
+            .is_ok_and(|stored| same_link_target(&stored, &legacy_claude, &agents));
+    if retire_claude_link {
+        inputs.push(legacy_claude.clone());
     }
     inputs.extend(links.iter().map(|(_, link)| link.clone()));
     let guard = InputGuard::capture(inputs);
@@ -144,6 +152,16 @@ pub fn sync(clis: &[Cli], opts: &Options) -> R<Outcome> {
             path: link.clone(),
             after: Node::Symlink(desired),
             label: format!("{verb} {} -> {}", link.display(), target.display()),
+        });
+    }
+    if retire_claude_link {
+        ops.push(Operation {
+            path: legacy_claude.clone(),
+            after: Node::Absent,
+            label: format!(
+                "removed legacy {} (Claude reads AGENTS.md directly)",
+                legacy_claude.display()
+            ),
         });
     }
     if opts.instructions && clis.contains(&Cli::Antigravity) && !rule.exists() {
