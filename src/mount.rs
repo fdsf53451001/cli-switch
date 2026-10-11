@@ -3,7 +3,7 @@
 //! - Claude Code: native SessionStart hook in settings.json (reliable).
 //! - Codex: hooks.json SessionStart entry (mechanism verified; schema may need
 //!   `codex /hooks` approval — marked experimental).
-//! - opencode: a global plugin that runs sync on session start (experimental).
+//! - opencode: a global plugin that runs sync on server start (experimental).
 //! - Antigravity CLI (`agy`): native lifecycle hook in ~/.gemini/config/hooks.json.
 //! - Copilot: dedicated user-level hooks file ~/.copilot/hooks/cli-switch.json.
 //! - Kiro: native `agentSpawn` hook, but it lives on a single agent (no global
@@ -289,7 +289,7 @@ fn install_opencode_plugin(exe: &str) -> R<String> {
     let path = paths::opencode_plugin();
     util::write_atomic(&path, &opencode_plugin_source(exe))?;
     Ok(format!(
-        "opencode: startup plugin written -> {}",
+        "opencode: startup plugin written -> {} (experimental)",
         path.display()
     ))
 }
