@@ -164,16 +164,14 @@ fn json_read_checked(text: &str, key: &str, parse: ParseFn) -> Result<McpMap, St
                     }
                 }
             }
-            for array_key in ["args"] {
-                if let Some(value) = fields.get(array_key) {
-                    let values = value.as_array().ok_or_else(|| {
-                        format!("MCP server '{name}' field '{array_key}' is not an array")
-                    })?;
-                    if values.iter().any(|value| !value.is_string()) {
-                        return Err(format!(
-                            "MCP server '{name}' field '{array_key}' contains a non-string value"
-                        ));
-                    }
+            if let Some(value) = fields.get("args") {
+                let values = value
+                    .as_array()
+                    .ok_or_else(|| format!("MCP server '{name}' field 'args' is not an array"))?;
+                if values.iter().any(|value| !value.is_string()) {
+                    return Err(format!(
+                        "MCP server '{name}' field 'args' contains a non-string value"
+                    ));
                 }
             }
             if let Some(value) = fields.get("command") {
